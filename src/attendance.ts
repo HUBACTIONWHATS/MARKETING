@@ -413,6 +413,13 @@ export interface AddMessageInput {
    * (não conta duas vezes, não reabre espera encerrada, etc).
    */
   externalId?: string | null;
+  /**
+   * Instante em que a mensagem aconteceu na origem (ex.: timestamp que a Meta
+   * manda no webhook). Sem isso, usa o relógio do servidor. Importante quando
+   * a entrega atrasa (reentrega, servidor "dormindo" em plano gratuito): o
+   * cronômetro conta a partir do horário real, não do horário em que chegou.
+   */
+  occurredAt?: string | null;
 }
 
 /**
@@ -444,7 +451,7 @@ export function addMessage(input: AddMessageInput): Message {
     if (existing) return existing;
   }
 
-  const at = nowIso();
+  const at = input.occurredAt && !Number.isNaN(new Date(input.occurredAt).getTime()) ? input.occurredAt : nowIso();
   const sendStatus: SendStatus = input.sendStatus ?? "ENVIADA";
 
   const info = db

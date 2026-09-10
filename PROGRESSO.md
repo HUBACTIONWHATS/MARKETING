@@ -341,3 +341,40 @@ Testar com o número de teste da Meta continua disponível (CONEXAO_WHATSAPP.md)
 - Plataforma do robô real ainda não identificada pelo usuário — sem isso, a conexão com o atendimento real não avança (ver seção 4 acima).
 - `statuses` de mensagens `FALHOU` reportadas pela Meta (depois de aceitar o envio) só geram log — não reabrem a espera automaticamente; decisão consciente, não implementada por não ter sido pedida.
 - Aguardando a próxima instrução do usuário. Não iniciar nada novo sem comando.
+
+## Etapa concluída: Etapa 8 — Preparação do piloto externo (demonstração), pronta para revisão
+
+**Nada publicado, nenhum serviço contratado, nenhum cartão ou credencial cadastrado.** Número comercial, recebimento/envio reais e integração com o robô continuam pendentes e estão declarados assim nas telas.
+
+### Decisões
+
+- **Tela "Conexão do WhatsApp"** (Configurações, só `COMPANY_ADMIN`): modo Demonstração/Teste/Produção (declarado por quem conecta via `conectar-whatsapp.ts teste|producao`, nunca adivinhado), número associado, credenciais só como "configurado/não configurado" (valor nunca aparece), última mensagem real recebida e última resposta real enviada (só contam mensagens com `wamid`), botão **"Verificar agora com a Meta"** (GET real na Graph API, resultado gravado em `whatsapp_connections.last_verified_*`), pendências em linguagem simples — incluindo, sempre, "integração com o robô/atendimento atual não comprovada" — e aviso de que a tela não corrige conflitos de cadastro na Meta. Status nunca vira "Conectado" só por campo preenchido (testado: 2 de 3 credenciais → "Configuração incompleta").
+- **Cadastro por convite e recuperação de acesso sem e-mail** (`migrations/0008`, [src/access.ts](src/access.ts)): tokens aleatórios, guardados como SHA-256, uso único, validade (convite 7 dias, redefinição 2 h); o link aparece uma vez na tela para quem gerou entregar. Redefinir senha ou desativar usuário derruba as sessões da pessoa.
+- **Painel da Hub Action** (`/admin`): criar empresa, plano manual (Demonstração/Piloto/Ativo + observações, **sem preço, sem cobrança**), suspender acesso (bloqueado no servidor em `requireCompanyAccess`), usuários por empresa (link de nova senha, ativar/desativar), convites, situação da conexão do WhatsApp por empresa, **log de auditoria** (`/admin/log`: login ok/falha, convites, redefinições, planos, ativação).
+- **Equipe** (Configurações do admin da empresa): convites de atendente/administrador, link de nova senha, ativar/desativar — só usuários da própria empresa (testado: 403/"não pertence" para usuário de outra empresa).
+- **Sessões no banco** ([src/sessionStore.ts](src/sessionStore.ts)) — a MemoryStore não serve para produção; reiniciar o servidor não desloga mais.
+- **Guardas de produção**: com `NODE_ENV=production` exige `SESSION_SECRET` ≥ 32 caracteres (recusa iniciar), `trust proxy`, cookie `secure`, validade de 7 dias. `PUBLIC_BASE_URL` para montar os links.
+- **Cronômetro robusto a atraso de entrega**: mensagens do webhook usam o timestamp que a Meta envia (`occurredAt`), não o horário de chegada — relevante se a hospedagem gratuita "dormir".
+- **Mensagens simuladas identificadas**: etiqueta "simulada" na caixa de entrada e "conversa simulada — não é WhatsApp real" no detalhe, além do banner global.
+- **Hospedagem** (pesquisa com fontes em [PUBLICACAO.md](PUBLICACAO.md)): opção principal **Render (app, gratuito, dorme após 15 min) + Neon (Postgres gratuito, permanente, uso comercial explícito)** — **pré-requisito não feito: migrar SQLite → PostgreSQL** (etapa própria). Alternativa mantendo SQLite: VM Oracle Always Free (termos ambíguos para SaaS comercial; aceitável para PoC). Impacto do gratuito no recebimento explicado (atraso de ~1 min ao acordar; nada se perde; métrica correta pelo timestamp da Meta).
+- **Relatórios** (item de menu) continua vazio por design — o Dashboard já cobre funil e indicadores por período.
+
+### Verificado
+
+- `npm test`: **51/51** (novos: convite uso único e hash, expiração, redefinição derruba sessão, desativação, store de sessão com expiração, `occurredAt`, status da conexão em 6 cenários).
+- Ponta a ponta com servidor real: Hub Action cria empresa → convite de administrador → cliente cria senha pelo link → cai só na própria empresa (403 na Empresa A e em `/admin`) → vê Equipe e Conexão do WhatsApp ("Modo demonstração") → convida atendente → atendente não vê área de admin → link de nova senha funciona, sessão antiga cai, senha nova entra → desativada não loga → empresa suspensa recebe 403 e volta ao reativar → painel mostra plano e conexão → log registra tudo → sessão sobrevive ao reinício do servidor. Atendente não vê a área de conexão; Empresa B não vê a conexão da A.
+- Regressão: fluxo de demonstração (contatos, conversas, transferência, cronômetro, funil, dashboard) coberto pelos 38 testes anteriores, todos passando.
+
+### O que depende de você antes de publicar (detalhado em PUBLICACAO.md)
+
+1. Decidir hospedagem: Render+Neon (exige eu migrar o banco para Postgres primeiro) ou VM com SQLite.
+2. Criar as contas nos serviços (sem cartão nos planos gratuitos citados) e definir `SESSION_SECRET`, `PUBLIC_BASE_URL` e, se for o caso, `NODE_ENV`.
+3. Decidir se o piloto sobe com banner/simulador visíveis (recomendado para demonstração) ou com `NODE_ENV=production`.
+4. Trocar a senha da Hub Action e **não** levar os usuários de demonstração `*@empresa-*.dev` para o piloto externo.
+
+### Pendências reais
+
+- Migração SQLite → PostgreSQL (necessária para a opção principal de hospedagem).
+- Sem limite de tentativas de login, sem CSRF além de `sameSite=lax`, sem 2FA; credenciais do WhatsApp globais por instalação (um número real por servidor).
+- Diagnóstico da mensagem real ao número de teste ainda em aberto; plataforma do robô ainda não identificada.
+- Aguardando sua revisão e autorização para a próxima etapa (migração do banco e/ou publicação).

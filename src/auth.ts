@@ -19,7 +19,8 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
     return;
   }
   const user = findUserById(userId);
-  if (!user) {
+  if (!user || !user.active) {
+    // Usuário removido ou desativado pela Hub Action/administrador: sessão deixa de valer.
     req.session.destroy(() => res.redirect("/login"));
     return;
   }
@@ -59,6 +60,11 @@ export function requireCompanyAccess(req: Request, res: Response, next: NextFunc
     const membership = findMembership(res.locals.user.id, companyId);
     if (!membership) {
       res.status(403).send(forbiddenPage());
+      return;
+    }
+    if (company.suspended) {
+      // Suspensão manual pela Hub Action (controle de plano): bloqueia no servidor, não só na tela.
+      res.status(403).send(forbiddenPage("O acesso desta empresa está suspenso. Fale com a Hub Action."));
       return;
     }
     res.locals.company = company;

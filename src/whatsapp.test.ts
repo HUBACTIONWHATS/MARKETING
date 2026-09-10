@@ -154,3 +154,127 @@ test("enviar sem WHATSAPP_ACCESS_TOKEN configurado recusa com erro claro, não t
   assert.equal(result.ok, false);
   assert.match(result.error ?? "", /não configurado/);
 });
+
+// --- Status real da conexão (nunca "Conectado" só por campo preenchido) -----
+
+function clearWhatsappEnv(): void {
+  delete process.env.WHATSAPP_VERIFY_TOKEN;
+  delete process.env.WHATSAPP_APP_SECRET;
+  delete process.env.WHATSAPP_ACCESS_TOKEN;
+}
+
+test("sem número associado: modo demonstração, mesmo com credenciais configuradas", () => {
+  clearWhatsappEnv();
+  process.env.WHATSAPP_VERIFY_TOKEN = "v";
+  process.env.WHATSAPP_APP_SECRET = "s";
+  process.env.WHATSAPP_ACCESS_TOKEN = "t";
+  const companyId = makeCompany();
+
+  const report = W.buildConnectionStatusReport(companyId);
+  assert.equal(report.mode, "DEMONSTRACAO");
+  assert.equal(report.statusLabel, "Modo demonstração");
+  assert.equal(report.connection, null);
+  clearWhatsappEnv();
+});
+
+test("número associado mas credenciais ausentes: 'Configuração incompleta', nunca 'Conectado'", () => {
+  clearWhatsappEnv();
+  const companyId = makeCompany();
+  Dbm.db
+    .prepare(
+      "INSERT INTO whatsapp_connections (company_id, phone_number_id, environment, active, created_at) VALUES (?, 'PN1', 'TESTE', 1, datetime('now'))"
+    )
+    .run(companyId);
+
+  const report = W.buildConnectionStatusReport(companyId);
+  assert.equal(report.statusLabel, "Configuração incompleta");
+  assert.notEqual(report.statusLabel, "Conectado");
+});
+
+test("número associado e credenciais completas, nunca verificado: 'Ainda não verificado'", () => {
+  clearWhatsappEnv();
+  process.env.WHATSAPP_VERIFY_TOKEN = "v";
+  process.env.WHATSAPP_APP_SECRET = "s";
+  process.env.WHATSAPP_ACCESS_TOKEN = "t";
+  const companyId = makeCompany();
+  Dbm.db
+    .prepare(
+      "INSERT INTO whatsapp_connections (company_id, phone_number_id, environment, active, created_at) VALUES (?, 'PN2', 'TESTE', 1, datetime('now'))"
+    )
+    .run(companyId);
+
+  const report = W.buildConnectionStatusReport(companyId);
+  assert.equal(report.statusLabel, "Ainda não verificado");
+  clearWhatsappEnv();
+});
+
+test("recordVerification grava o resultado real; status reflete sucesso e falha corretamente", () => {
+  clearWhatsappEnv();
+  process.env.WHATSAPP_VERIFY_TOKEN = "v";
+  process.env.WHATSAPP_APP_SECRET = "s";
+  process.env.WHATSAPP_ACCESS_TOKEN = "t";
+  const companyId = makeCompany();
+  Dbm.db
+    .prepare(
+      "INSERT INTO whatsapp_connections (company_id, phone_number_id, environment, active, created_at) VALUES (?, 'PN3', 'TESTE', 1, datetime('now'))"
+    )
+    .run(companyId);
+
+  W.recordVerification("PN3", { ok: true, detail: "Confirmado pela Meta: +55 11 90000-0000." });
+  assert.equal(W.buildConnectionStatusReport(companyId).statusLabel, "Verificado pela Meta");
+
+  W.recordVerification("PN3", { ok: false, detail: "Token expirado." });
+  const failReport = W.buildConnectionStatusReport(companyId);
+  assert.equal(failReport.statusLabel, "Falha na última verificação");
+  assert.ok(failReport.pendencies.some((p) => p.includes("Token expirado")));
+  clearWhatsappEnv();
+});
+
+test("evidências reais: última mensagem recebida/enviada só aparecem quando existem de verdade (com wamid)", () => {
+  clearWhatsappEnv();
+  const companyId = makeCompany();
+  Dbm.db
+    .prepare(
+      "INSERT INTO whatsapp_connections (company_id, phone_number_id, environment, active, created_at) VALUES (?, 'PN4', 'TESTE', 1, datetime('now'))"
+    )
+    .run(companyId);
+
+  const reportBefore = W.buildConnectionStatusReport(companyId);
+  assert.equal(reportBefore.lastInbound, null);
+  assert.equal(reportBefore.lastOutbound, null);
+  assert.ok(reportBefore.pendencies.some((p) => p.includes("Nenhuma mensagem real de cliente")));
+
+  const contact = A.findOrCreateContact(companyId, "Cliente Evidencia", "+55 11 90000-9999");
+  const conv = A.createConversation(companyId, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
+  A.addMessage({ companyId, conversationId: conv.id, authorType: "CLIENTE", body: "oi", externalId: "wamid.IN1" });
+  A.addMessage({ companyId, conversationId: conv.id, authorType: "HUMANO", body: "olá!", externalId: "wamid.OUT1" });
+
+  const reportAfter = W.buildConnectionStatusReport(companyId);
+  assert.ok(reportAfter.lastInbound);
+  assert.ok(reportAfter.lastOutbound);
+});
+
+test("a pendência sobre o robô/atendimento atual não comprovado aparece sempre, mesmo tudo verificado", () => {
+  clearWhatsappEnv();
+  process.env.WHATSAPP_VERIFY_TOKEN = "v";
+  process.env.WHATSAPP_APP_SECRET = "s";
+  process.env.WHATSAPP_ACCESS_TOKEN = "t";
+  const companyId = makeCompany();
+  Dbm.db
+    .prepare(
+      "INSERT INTO whatsapp_connections (company_id, phone_number_id, environment, active, created_at) VALUES (?, 'PN5', 'TESTE', 1, datetime('now'))"
+    )
+    .run(companyId);
+  W.recordVerification("PN5", { ok: true, detail: "ok" });
+
+  const report = W.buildConnectionStatusReport(companyId);
+  assert.ok(report.pendencies.some((p) => p.includes("robô/atendimento atual") && p.includes("não foi comprovada")));
+  clearWhatsappEnv();
+});
+
+test("verificar conexão sem token de acesso não chama a Meta e recusa com erro claro", async () => {
+  clearWhatsappEnv();
+  const result = await W.verifyPhoneNumberConnection("qualquer-id");
+  assert.equal(result.ok, false);
+  assert.match(result.detail, /não configurado/);
+});

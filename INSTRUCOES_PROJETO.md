@@ -43,6 +43,6 @@ Ver detalhes e justificativa em [PROGRESSO.md](PROGRESSO.md).
 
 ## Como continuar
 
-1. Ler [PROGRESSO.md](PROGRESSO.md) para saber a última etapa concluída e a próxima tarefa. O roteiro manual para testadores não técnicos fica em [ROTEIRO_TESTE.md](ROTEIRO_TESTE.md) — manter atualizado quando uma etapa mudar o fluxo de uso. A integração com WhatsApp real (pesquisa, limitações, checklist de conexão) fica em [CONEXAO_WHATSAPP.md](CONEXAO_WHATSAPP.md) — nunca conectar um número real do usuário sem passar pelo checklist de lá.
+1. Ler [PROGRESSO.md](PROGRESSO.md) para saber a última etapa concluída e a próxima tarefa. O roteiro manual para testadores não técnicos fica em [ROTEIRO_TESTE.md](ROTEIRO_TESTE.md) — manter atualizado quando uma etapa mudar o fluxo de uso. A integração com WhatsApp real (pesquisa, limitações, checklist de conexão) fica em [CONEXAO_WHATSAPP.md](CONEXAO_WHATSAPP.md) — nunca conectar um número real do usuário sem passar pelo checklist de lá. A avaliação de hospedagem, configuração de produção e roteiro de publicação ficam em [PUBLICACAO.md](PUBLICACAO.md) — nunca contratar serviço, publicar ou cadastrar cartão sem autorização explícita do usuário.
 2. Executar apenas a próxima tarefa indicada, salvo instrução diferente do usuário.
 3. Atualizar PROGRESSO.md ao final.

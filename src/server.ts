@@ -2,7 +2,18 @@ import "./env"; // precisa vir antes de tudo: carrega .env em process.env
 import express from "express";
 import session from "express-session";
 import path from "path";
+import {
+  acceptInvite,
+  audit,
+  completePasswordReset,
+  createInvite,
+  createPasswordReset,
+  findValidToken,
+  listAuditEntries,
+  listPendingInvites,
+} from "./access";
 import { requireAuth, requireCompanyAccess, requirePlatformAdmin, verifyPassword } from "./auth";
+import { SqliteSessionStore } from "./sessionStore";
 import {
   addMessage,
   assumeConversation,
@@ -36,27 +47,41 @@ import {
 import { computeDashboard } from "./dashboard";
 import { runMigrations } from "./db";
 import {
+  createCompany,
+  findCompanyById,
   findUserByEmail,
   findUserById,
-  listCompanies,
+  listCompaniesForAdmin,
   listCompanyMembers,
+  listCompanyUsers,
   listMembershipsForUser,
+  setUserActive,
+  updateCompanyPlan,
   updateCompanySettings,
   updateSlaTarget,
+  type CompanyPlan,
+  type Role,
 } from "./models";
 import {
+  buildConnectionStatusReport,
   findConnectionByPhoneNumberId,
   getWhatsappCredentials,
   listConnectionsForCompany,
   parseWebhookPayload,
+  recordVerification,
   sendWhatsAppMessage,
+  verifyPhoneNumberConnection,
   verifyWebhookSignature,
 } from "./whatsapp";
 import {
   adminPage,
   appShell,
+  auditLogPage,
   companySelectorPage,
   conversationDetailPage,
+  invitePage,
+  messagePage,
+  resetPage,
   crmPage,
   crmStagesPage,
   dashboardPage,
@@ -73,17 +98,38 @@ const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 const IS_DEV = process.env.NODE_ENV !== "production";
 
+// --- Guardas de produção ----------------------------------------------------
+// Em produção: exige SESSION_SECRET real, confia no proxy da hospedagem (HTTPS
+// terminado nele) e marca o cookie como secure. Nada disso muda o uso local.
+if (!IS_DEV) {
+  if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) {
+    console.error("SESSION_SECRET ausente ou curto demais (mínimo 32 caracteres). Recusando iniciar em produção.");
+    process.exit(1);
+  }
+  app.set("trust proxy", 1);
+}
+
 app.use(express.urlencoded({ extended: false }));
 // index:false — sem isso um index.html em public/ responderia "/" antes do redirecionamento para o login.
 app.use(express.static(path.join(__dirname, "..", "public"), { index: false }));
 app.use(
   session({
+    store: new SqliteSessionStore(),
     secret: process.env.SESSION_SECRET || "dev-secret-nao-usar-em-producao",
     resave: false,
     saveUninitialized: false,
-    cookie: { httpOnly: true, sameSite: "lax" },
+    cookie: { httpOnly: true, sameSite: "lax", secure: !IS_DEV, maxAge: 7 * 24 * 60 * 60 * 1000 },
   })
 );
+
+/** URL pública base (para montar links de convite/redefinição), respeitando o proxy em produção. */
+function publicBaseUrl(req: express.Request): string {
+  return process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
+}
+
+function clientIp(req: express.Request): string {
+  return req.ip ?? "";
+}
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
@@ -150,6 +196,10 @@ app.post("/webhooks/whatsapp", whatsappJsonParser, async (req, res) => {
       const conv = findOrCreateOpenConversation(connection.company_id, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
       // Botão oficial cujo texto bate com pedido de atendente = gatilho B; qualquer outro clique é uma mensagem normal.
       const platformSignal = msg.isInteractiveReply && detectHumanRequest(msg.body) ? "BOTAO_PLATAFORMA" : undefined;
+      // A Meta manda o timestamp (segundos Unix) de quando o cliente enviou —
+      // é ele que vale para o cronômetro, mesmo se a entrega atrasar.
+      const ts = Number(msg.timestamp);
+      const occurredAt = Number.isFinite(ts) && ts > 0 ? new Date(ts * 1000).toISOString() : null;
       addMessage({
         companyId: connection.company_id,
         conversationId: conv.id,
@@ -157,6 +207,7 @@ app.post("/webhooks/whatsapp", whatsappJsonParser, async (req, res) => {
         body: msg.body,
         externalId: msg.waMessageId,
         platformSignal,
+        occurredAt,
       });
       console.log(
         `[whatsapp] mensagem ${msg.waMessageId} registrada (empresa ${connection.company_id}, conversa ${conv.id})${platformSignal ? ` [gatilho ${platformSignal}]` : ""}`
@@ -185,8 +236,9 @@ app.get("/login", (req, res) => {
 
 app.post("/login", (req, res) => {
   const { email, password } = req.body as { email?: string; password?: string };
-  const user = email ? findUserByEmail(email) : undefined;
-  if (!user || !password || !verifyPassword(password, user.password_hash)) {
+  const user = email ? findUserByEmail(email.trim().toLowerCase()) ?? findUserByEmail(email.trim()) : undefined;
+  if (!user || !password || !verifyPassword(password, user.password_hash) || !user.active) {
+    audit("login_falhou", { userId: user?.id ?? null, detail: email ? `e-mail: ${email.trim().slice(0, 120)}` : undefined, ip: clientIp(req) });
     res.status(401).send(loginPage("E-mail ou senha inválidos."));
     return;
   }
@@ -196,8 +248,65 @@ app.post("/login", (req, res) => {
       return;
     }
     req.session.userId = user.id;
+    audit("login_ok", { userId: user.id, ip: clientIp(req) });
     res.redirect("/");
   });
+});
+
+// --- Convite (cria acesso) e redefinição de senha por link ----------------
+
+app.get("/convite/:token", (req, res) => {
+  const token = String(req.params.token);
+  const invite = findValidToken("CONVITE", token);
+  const company = invite?.company_id ? findCompanyById(invite.company_id) : undefined;
+  if (!invite || !company) {
+    res.status(404).send(messagePage("Convite inválido", "Este convite não existe, já foi usado ou expirou. Peça um novo link a quem te convidou."));
+    return;
+  }
+  res.send(invitePage({ token, email: invite.email, companyName: company.name }));
+});
+
+app.post("/convite/:token", (req, res) => {
+  const token = String(req.params.token);
+  const { name, password } = req.body as { name?: string; password?: string };
+  const invite = findValidToken("CONVITE", token);
+  const company = invite?.company_id ? findCompanyById(invite.company_id) : undefined;
+  if (!invite || !company) {
+    res.status(404).send(messagePage("Convite inválido", "Este convite não existe, já foi usado ou expirou."));
+    return;
+  }
+  if (!name || !name.trim()) {
+    res.status(400).send(invitePage({ token, email: invite.email, companyName: company.name, error: "Informe seu nome." }));
+    return;
+  }
+  const result = acceptInvite(token, name, password ?? "");
+  if (!result.ok) {
+    res.status(400).send(invitePage({ token, email: invite.email, companyName: company.name, error: result.error }));
+    return;
+  }
+  audit("convite_aceito", { companyId: company.id, userId: result.userId, detail: invite.email, ip: clientIp(req) });
+  res.send(messagePage("Acesso criado", `Pronto! Entre com o e-mail ${invite.email} e a senha que você acabou de criar.`));
+});
+
+app.get("/redefinir/:token", (req, res) => {
+  const token = String(req.params.token);
+  if (!findValidToken("REDEFINICAO", token)) {
+    res.status(404).send(messagePage("Link inválido", "Este link de redefinição não existe, já foi usado ou expirou (vale por 2 horas). Peça um novo."));
+    return;
+  }
+  res.send(resetPage({ token }));
+});
+
+app.post("/redefinir/:token", (req, res) => {
+  const token = String(req.params.token);
+  const { password } = req.body as { password?: string };
+  const result = completePasswordReset(token, password ?? "");
+  if (!result.ok) {
+    res.status(400).send(resetPage({ token, error: result.error }));
+    return;
+  }
+  audit("senha_redefinida", { userId: result.userId, ip: clientIp(req) });
+  res.send(messagePage("Senha alterada", "Sua nova senha já vale. Entre novamente."));
 });
 
 app.post("/logout", (req, res) => {
@@ -227,8 +336,90 @@ app.get("/empresas", requireAuth, (_req, res) => {
   res.send(companySelectorPage(memberships));
 });
 
-app.get("/admin", requirePlatformAdmin, (_req, res) => {
-  res.send(adminPage(listCompanies()));
+// --- Painel da Hub Action: empresas, usuários, planos manuais, conexões -----
+
+function renderAdmin(res: express.Response, extra: { generatedLink?: { label: string; url: string }; notice?: string; error?: string } = {}): void {
+  const companies = listCompaniesForAdmin();
+  const statuses = new Map(companies.map((c) => [c.id, buildConnectionStatusReport(c.id)]));
+  const usersByCompany = new Map(companies.map((c) => [c.id, listCompanyUsers(c.id)]));
+  const invitesByCompany = new Map(companies.map((c) => [c.id, listPendingInvites(c.id)]));
+  res.send(adminPage({ currentUserId: res.locals.user.id, companies, statuses, usersByCompany, invitesByCompany, ...extra }));
+}
+
+app.get("/admin", requirePlatformAdmin, (_req, res) => renderAdmin(res));
+
+app.get("/admin/log", requirePlatformAdmin, (_req, res) => {
+  res.send(auditLogPage(listAuditEntries(200), "/admin"));
+});
+
+app.post("/admin/empresas", requirePlatformAdmin, (req, res) => {
+  const { name } = req.body as { name?: string };
+  if (!name || !name.trim()) {
+    renderAdmin(res, { error: "Informe o nome da empresa." });
+    return;
+  }
+  const company = createCompany(name);
+  audit("empresa_criada", { companyId: company.id, userId: res.locals.user.id, detail: company.name, ip: clientIp(req) });
+  renderAdmin(res, { notice: `Empresa "${company.name}" criada em modo demonstração. Gere um convite de administrador para o cliente entrar.` });
+});
+
+app.post("/admin/empresas/:companyId/plano", requirePlatformAdmin, (req, res) => {
+  const companyId = Number(req.params.companyId);
+  const company = findCompanyById(companyId);
+  if (!company) {
+    renderAdmin(res, { error: "Empresa não encontrada." });
+    return;
+  }
+  const body = req.body as { plan?: string; suspended?: string; plan_notes?: string };
+  const plan: CompanyPlan = body.plan === "PILOTO" || body.plan === "ATIVO" ? body.plan : "DEMONSTRACAO";
+  const suspended = body.suspended === "1";
+  updateCompanyPlan(companyId, plan, suspended, body.plan_notes?.trim() || null);
+  audit("plano_alterado", {
+    companyId,
+    userId: res.locals.user.id,
+    detail: `${plan}${suspended ? " (suspensa)" : ""}`,
+    ip: clientIp(req),
+  });
+  renderAdmin(res, { notice: `Plano de "${company.name}" atualizado.` });
+});
+
+app.post("/admin/empresas/:companyId/convites", requirePlatformAdmin, (req, res) => {
+  const companyId = Number(req.params.companyId);
+  const company = findCompanyById(companyId);
+  const { email, role } = req.body as { email?: string; role?: string };
+  if (!company || !email || !email.includes("@")) {
+    renderAdmin(res, { error: "Empresa ou e-mail inválido." });
+    return;
+  }
+  const inviteRole: Role = role === "COMPANY_ADMIN" ? "COMPANY_ADMIN" : "AGENT";
+  const token = createInvite(companyId, email, inviteRole, res.locals.user.id);
+  audit("convite_criado", { companyId, userId: res.locals.user.id, detail: `${email} (${inviteRole})`, ip: clientIp(req) });
+  renderAdmin(res, {
+    generatedLink: { label: `Convite para ${email} — ${company.name}`, url: `${publicBaseUrl(req)}/convite/${token}` },
+  });
+});
+
+app.post("/admin/usuarios/:userId/redefinir", requirePlatformAdmin, (req, res) => {
+  const user = findUserById(Number(req.params.userId));
+  if (!user) {
+    renderAdmin(res, { error: "Usuário não encontrado." });
+    return;
+  }
+  const token = createPasswordReset(user.id, user.email, res.locals.user.id);
+  audit("redefinicao_gerada", { userId: user.id, detail: `por Hub Action (${res.locals.user.email})`, ip: clientIp(req) });
+  renderAdmin(res, { generatedLink: { label: `Nova senha para ${user.name} (${user.email}) — vale 2 horas`, url: `${publicBaseUrl(req)}/redefinir/${token}` } });
+});
+
+app.post("/admin/usuarios/:userId/ativo", requirePlatformAdmin, (req, res) => {
+  const user = findUserById(Number(req.params.userId));
+  if (!user || user.id === res.locals.user.id) {
+    renderAdmin(res, { error: "Usuário inválido." });
+    return;
+  }
+  const active = (req.body as { active?: string }).active === "1";
+  setUserActive(user.id, active);
+  audit(active ? "usuario_reativado" : "usuario_desativado", { userId: user.id, detail: `por Hub Action (${res.locals.user.email})`, ip: clientIp(req) });
+  renderAdmin(res, { notice: `${user.name} ${active ? "reativado" : "desativado"}.` });
 });
 
 // --- Conversas (caixa de entrada + simulador exclusivo de desenvolvimento) --
@@ -436,7 +627,13 @@ app.post("/empresa/:companyId/conversas/:conversationId/simular/robo", requireCo
 
 // --- Configurações: fuso horário e expediente da empresa --------------------
 
-app.get("/empresa/:companyId/configuracoes", requireCompanyAccess, (_req, res) => {
+/** Dados da equipe para a tela de Configurações (só admin da empresa). */
+function teamData(res: express.Response, extra: { generatedLink?: { label: string; url: string }; notice?: string; error?: string } = {}) {
+  const company = res.locals.company;
+  return { users: listCompanyUsers(company.id), invites: listPendingInvites(company.id), currentUserId: res.locals.user.id as number, ...extra };
+}
+
+function renderSettings(res: express.Response, teamExtra: { generatedLink?: { label: string; url: string }; notice?: string; error?: string } = {}): void {
   const company = res.locals.company;
   const canEdit = res.locals.membership.role === "COMPANY_ADMIN";
   res.send(
@@ -446,8 +643,60 @@ app.get("/empresa/:companyId/configuracoes", requireCompanyAccess, (_req, res) =
       role: res.locals.membership.role,
       canEdit,
       hours: parseBusinessHours(company.business_hours),
+      whatsapp: canEdit ? buildConnectionStatusReport(company.id) : undefined,
+      team: canEdit ? teamData(res, teamExtra) : undefined,
     })
   );
+}
+
+app.get("/empresa/:companyId/configuracoes", requireCompanyAccess, (_req, res) => renderSettings(res));
+
+function requireCompanyAdmin(req: express.Request, res: express.Response, next: express.NextFunction): void {
+  requireCompanyAccess(req, res, () => {
+    if (res.locals.membership.role !== "COMPANY_ADMIN") {
+      res.status(403).send("Apenas o administrador da empresa pode fazer isso.");
+      return;
+    }
+    next();
+  });
+}
+
+app.post("/empresa/:companyId/configuracoes/equipe/convites", requireCompanyAdmin, (req, res) => {
+  const company = res.locals.company;
+  const { email, role } = req.body as { email?: string; role?: string };
+  if (!email || !email.includes("@")) {
+    renderSettings(res, { error: "Informe um e-mail válido." });
+    return;
+  }
+  const inviteRole: Role = role === "COMPANY_ADMIN" ? "COMPANY_ADMIN" : "AGENT";
+  const token = createInvite(company.id, email, inviteRole, res.locals.user.id);
+  audit("convite_criado", { companyId: company.id, userId: res.locals.user.id, detail: `${email} (${inviteRole})`, ip: clientIp(req) });
+  renderSettings(res, { generatedLink: { label: `Convite para ${email}`, url: `${publicBaseUrl(req)}/convite/${token}` } });
+});
+
+app.post("/empresa/:companyId/configuracoes/equipe/:userId/redefinir", requireCompanyAdmin, (req, res) => {
+  const company = res.locals.company;
+  const target = listCompanyUsers(company.id).find((u) => u.user_id === Number(req.params.userId));
+  if (!target) {
+    renderSettings(res, { error: "Usuário não pertence a esta empresa." });
+    return;
+  }
+  const token = createPasswordReset(target.user_id, target.email, res.locals.user.id);
+  audit("redefinicao_gerada", { companyId: company.id, userId: target.user_id, detail: `por ${res.locals.user.email}`, ip: clientIp(req) });
+  renderSettings(res, { generatedLink: { label: `Nova senha para ${target.name} — vale 2 horas`, url: `${publicBaseUrl(req)}/redefinir/${token}` } });
+});
+
+app.post("/empresa/:companyId/configuracoes/equipe/:userId/ativo", requireCompanyAdmin, (req, res) => {
+  const company = res.locals.company;
+  const target = listCompanyUsers(company.id).find((u) => u.user_id === Number(req.params.userId));
+  if (!target || target.user_id === res.locals.user.id) {
+    renderSettings(res, { error: "Usuário inválido." });
+    return;
+  }
+  const active = (req.body as { active?: string }).active === "1";
+  setUserActive(target.user_id, active);
+  audit(active ? "usuario_reativado" : "usuario_desativado", { companyId: company.id, userId: target.user_id, detail: `por ${res.locals.user.email}`, ip: clientIp(req) });
+  renderSettings(res, { notice: `${target.name} ${active ? "reativado" : "desativado"}.` });
 });
 
 const WEEKDAY_KEYS: WeekdayKey[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
@@ -479,7 +728,16 @@ app.post("/empresa/:companyId/configuracoes", requireCompanyAccess, (req, res) =
 
   if (error) {
     res.status(400).send(
-      settingsPage({ company, user: res.locals.user, role: res.locals.membership.role, canEdit: true, hours, error })
+      settingsPage({
+        company,
+        user: res.locals.user,
+        role: res.locals.membership.role,
+        canEdit: true,
+        hours,
+        whatsapp: buildConnectionStatusReport(company.id),
+        team: teamData(res),
+        error,
+      })
     );
     return;
   }
@@ -492,7 +750,42 @@ app.post("/empresa/:companyId/configuracoes", requireCompanyAccess, (req, res) =
       role: res.locals.membership.role,
       canEdit: true,
       hours,
+      whatsapp: buildConnectionStatusReport(company.id),
+      team: teamData(res),
       success: "Configurações salvas.",
+    })
+  );
+});
+
+app.post("/empresa/:companyId/configuracoes/whatsapp/verificar", requireCompanyAccess, async (req, res) => {
+  const company = res.locals.company;
+  if (res.locals.membership.role !== "COMPANY_ADMIN") {
+    res.status(403).send("Apenas o administrador da empresa pode verificar a conexão.");
+    return;
+  }
+  const connection = listConnectionsForCompany(company.id).find((c) => c.active === 1);
+  let whatsappVerifySuccess: string | undefined;
+  let whatsappVerifyError: string | undefined;
+  if (!connection) {
+    whatsappVerifyError = "Nenhum número associado a esta empresa para verificar.";
+  } else {
+    const result = await verifyPhoneNumberConnection(connection.phone_number_id);
+    recordVerification(connection.phone_number_id, result);
+    if (result.ok) whatsappVerifySuccess = result.detail;
+    else whatsappVerifyError = result.detail;
+  }
+
+  res.send(
+    settingsPage({
+      company,
+      user: res.locals.user,
+      role: res.locals.membership.role,
+      canEdit: true,
+      hours: parseBusinessHours(company.business_hours),
+      whatsapp: buildConnectionStatusReport(company.id),
+      team: teamData(res),
+      whatsappVerifySuccess,
+      whatsappVerifyError,
     })
   );
 });

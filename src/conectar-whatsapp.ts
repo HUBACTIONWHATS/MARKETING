@@ -4,21 +4,31 @@
  * servidor — não existe tela para isso ainda (ver CONEXAO_WHATSAPP.md).
  *
  * Uso:
- *   npx tsx src/conectar-whatsapp.ts <slug-da-empresa> <phone_number_id> [waba_id] [numero_exibido]
+ *   npx tsx src/conectar-whatsapp.ts <slug-da-empresa> <phone_number_id> [teste|producao] [waba_id] [numero_exibido]
+ *
+ * O ambiente (teste/produção) é sempre declarado por quem conecta — nunca
+ * adivinhado pelo formato do número. Padrão: teste (mais seguro).
  *
  * Exemplo:
- *   npx tsx src/conectar-whatsapp.ts empresa-demo-a 123456789012345 987654321098765 "+55 11 91234-5678"
+ *   npx tsx src/conectar-whatsapp.ts empresa-demo-a 123456789012345 teste 987654321098765 "+55 11 91234-5678"
  */
 import "./env";
 import { db, runMigrations } from "./db";
-import { upsertConnection } from "./whatsapp";
+import { upsertConnection, type WhatsappEnvironment } from "./whatsapp";
 
 function main(): void {
-  const [slug, phoneNumberId, wabaId, displayPhoneNumber] = process.argv.slice(2);
+  const [slug, phoneNumberId, envArg, wabaId, displayPhoneNumber] = process.argv.slice(2);
   if (!slug || !phoneNumberId) {
-    console.error("Uso: npx tsx src/conectar-whatsapp.ts <slug-da-empresa> <phone_number_id> [waba_id] [numero_exibido]");
+    console.error(
+      "Uso: npx tsx src/conectar-whatsapp.ts <slug-da-empresa> <phone_number_id> [teste|producao] [waba_id] [numero_exibido]"
+    );
     process.exit(1);
   }
+  if (envArg && envArg !== "teste" && envArg !== "producao") {
+    console.error('O terceiro argumento, se usado, precisa ser exatamente "teste" ou "producao".');
+    process.exit(1);
+  }
+  const environment: WhatsappEnvironment = envArg === "producao" ? "PRODUCAO" : "TESTE";
 
   runMigrations();
 
@@ -30,10 +40,13 @@ function main(): void {
     process.exit(1);
   }
 
-  upsertConnection(company.id, phoneNumberId, wabaId || null, displayPhoneNumber || null);
-  console.log(`OK: phone_number_id ${phoneNumberId} associado à empresa "${company.name}" (id ${company.id}).`);
+  upsertConnection(company.id, phoneNumberId, wabaId || null, displayPhoneNumber || null, environment);
+  console.log(
+    `OK: phone_number_id ${phoneNumberId} associado à empresa "${company.name}" (id ${company.id}), ambiente ${environment}.`
+  );
   console.log("Lembrete: isso só faz efeito de verdade se WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET e");
   console.log("WHATSAPP_ACCESS_TOKEN também estiverem configurados no .env e o webhook cadastrado no Meta for Developers.");
+  console.log('Na tela Configurações → Conexão do WhatsApp, use "Verificar agora" para confirmar de verdade com a Meta.');
 }
 
 main();

@@ -62,4 +62,9 @@ taskkill /F /IM node.exe
 14. **Reinício.** Feche a aplicação (Ctrl + C) e abra de novo com `npm run dev`. Faça login de novo (a sessão não é guardada, isso é esperado). Tudo o que você fez — mensagens, oportunidade, tempos de espera — continua lá.
 15. **Outra empresa.** Entre como `admin@empresa-b.dev`: é um ambiente totalmente separado, sem nada do que você fez na Empresa A.
 
+16. **Painel da Hub Action.** Entre como `admin@hubaction.dev`. Crie uma empresa ("Criar empresa"), gere um **convite de administrador** para um e-mail seu — aparece um link. Abra o link em outra aba/navegador anônimo, crie a senha: você entra direto no painel dessa empresa nova, sem ver as outras.
+17. **Equipe.** Nessa empresa nova, em Configurações → Equipe, convide um atendente e gere um "Link de nova senha" para ele. Desative-o e confira que ele não consegue mais entrar.
+18. **Plano e suspensão.** De volta ao painel da Hub Action, marque "Suspender acesso" na empresa nova e salve: o cliente passa a ver "acesso suspenso". Desmarque para liberar. Veja o **Log de auditoria** com tudo que aconteceu.
+19. **Conexão do WhatsApp.** Em Configurações (como administrador da empresa), a área "Conexão do WhatsApp" mostra o modo (demonstração/teste/produção), o que está configurado e o que falta — nunca diz "conectado" sem uma verificação real com a Meta.
+
 Qualquer coisa diferente disso é um problema — anote em qual passo aconteceu.

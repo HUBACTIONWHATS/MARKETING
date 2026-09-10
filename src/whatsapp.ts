@@ -34,6 +34,8 @@ export function getWhatsappCredentials(): WhatsappCredentials {
 
 // --- Mapeamento número -> empresa -------------------------------------------
 
+export type WhatsappEnvironment = "TESTE" | "PRODUCAO";
+
 export interface WhatsappConnection {
   id: number;
   company_id: number;
@@ -42,6 +44,10 @@ export interface WhatsappConnection {
   display_phone_number: string | null;
   active: number;
   created_at: string;
+  environment: WhatsappEnvironment;
+  last_verified_at: string | null;
+  last_verified_ok: number | null; // 0 | 1 | null (nunca verificado)
+  last_verified_detail: string | null;
 }
 
 export function findConnectionByPhoneNumberId(phoneNumberId: string): WhatsappConnection | undefined {
@@ -54,20 +60,158 @@ export function listConnectionsForCompany(companyId: number): WhatsappConnection
   return db.prepare("SELECT * FROM whatsapp_connections WHERE company_id = ?").all(companyId) as WhatsappConnection[];
 }
 
-/** Cadastra (ou reativa) qual empresa é dona de um phone_number_id. Uso administrativo — ver CONEXAO_WHATSAPP.md. */
-export function upsertConnection(companyId: number, phoneNumberId: string, wabaId: string | null, displayPhoneNumber: string | null): void {
+/**
+ * Cadastra (ou reativa) qual empresa é dona de um phone_number_id. Uso
+ * administrativo — ver CONEXAO_WHATSAPP.md. `environment` é sempre declarado
+ * explicitamente por quem conecta (nunca adivinhado pelo formato do número).
+ */
+export function upsertConnection(
+  companyId: number,
+  phoneNumberId: string,
+  wabaId: string | null,
+  displayPhoneNumber: string | null,
+  environment: WhatsappEnvironment = "TESTE"
+): void {
   const existing = db.prepare("SELECT id FROM whatsapp_connections WHERE phone_number_id = ?").get(phoneNumberId) as
     | { id: number }
     | undefined;
   if (existing) {
     db.prepare(
-      "UPDATE whatsapp_connections SET company_id = ?, waba_id = ?, display_phone_number = ?, active = 1 WHERE id = ?"
-    ).run(companyId, wabaId, displayPhoneNumber, existing.id);
+      "UPDATE whatsapp_connections SET company_id = ?, waba_id = ?, display_phone_number = ?, environment = ?, active = 1 WHERE id = ?"
+    ).run(companyId, wabaId, displayPhoneNumber, environment, existing.id);
     return;
   }
   db.prepare(
-    "INSERT INTO whatsapp_connections (company_id, phone_number_id, waba_id, display_phone_number, active, created_at) VALUES (?, ?, ?, ?, 1, ?)"
-  ).run(companyId, phoneNumberId, wabaId, displayPhoneNumber, new Date().toISOString());
+    "INSERT INTO whatsapp_connections (company_id, phone_number_id, waba_id, display_phone_number, environment, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)"
+  ).run(companyId, phoneNumberId, wabaId, displayPhoneNumber, environment, new Date().toISOString());
+}
+
+/**
+ * Verificação REAL contra a Meta — nunca inferida de "os campos estão
+ * preenchidos". Faz uma leitura simples (GET, sem custo, não manda
+ * mensagem) confirmando que o token de acesso realmente enxerga esse número.
+ */
+export interface VerifyResult {
+  ok: boolean;
+  detail: string;
+}
+
+export async function verifyPhoneNumberConnection(phoneNumberId: string): Promise<VerifyResult> {
+  const { accessToken, graphApiVersion } = getWhatsappCredentials();
+  if (!accessToken) {
+    return { ok: false, detail: "WHATSAPP_ACCESS_TOKEN não configurado no servidor." };
+  }
+  try {
+    const res = await fetch(
+      `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}?fields=display_phone_number,verified_name`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    const json = (await res.json().catch(() => null)) as any;
+    if (!res.ok) {
+      return { ok: false, detail: json?.error?.message || `A Meta recusou a verificação (HTTP ${res.status}).` };
+    }
+    const label = json?.display_phone_number ? String(json.display_phone_number) : phoneNumberId;
+    return { ok: true, detail: `Confirmado pela Meta: ${label}${json?.verified_name ? ` (${json.verified_name})` : ""}.` };
+  } catch (err) {
+    return { ok: false, detail: err instanceof Error ? err.message : "Falha de rede ao consultar a Meta." };
+  }
+}
+
+export function recordVerification(phoneNumberId: string, result: VerifyResult): void {
+  db.prepare(
+    "UPDATE whatsapp_connections SET last_verified_at = ?, last_verified_ok = ?, last_verified_detail = ? WHERE phone_number_id = ?"
+  ).run(new Date().toISOString(), result.ok ? 1 : 0, result.detail, phoneNumberId);
+}
+
+export interface LastMessageInfo {
+  createdAt: string;
+  preview: string;
+}
+
+/** Última mensagem REAL recebida (do cliente, com wamid) por esta empresa — evidência concreta, não presunção. */
+export function getLastRealInboundMessage(companyId: number): LastMessageInfo | undefined {
+  const row = db
+    .prepare(
+      `SELECT m.created_at, m.body FROM messages m
+       JOIN conversations c ON c.id = m.conversation_id
+       WHERE c.company_id = ? AND c.channel = 'WHATSAPP_OFICIAL' AND m.author_type = 'CLIENTE' AND m.external_id IS NOT NULL
+       ORDER BY m.id DESC LIMIT 1`
+    )
+    .get(companyId) as { created_at: string; body: string } | undefined;
+  return row ? { createdAt: row.created_at, preview: row.body } : undefined;
+}
+
+/** Última resposta REAL enviada (aceita pela Graph API) por esta empresa. */
+export function getLastRealOutboundMessage(companyId: number): LastMessageInfo | undefined {
+  const row = db
+    .prepare(
+      `SELECT m.created_at, m.body FROM messages m
+       JOIN conversations c ON c.id = m.conversation_id
+       WHERE c.company_id = ? AND c.channel = 'WHATSAPP_OFICIAL' AND m.author_type = 'HUMANO' AND m.send_status = 'ENVIADA' AND m.external_id IS NOT NULL
+       ORDER BY m.id DESC LIMIT 1`
+    )
+    .get(companyId) as { created_at: string; body: string } | undefined;
+  return row ? { createdAt: row.created_at, preview: row.body } : undefined;
+}
+
+export type ConnectionMode = "DEMONSTRACAO" | "TESTE" | "PRODUCAO";
+
+export interface ConnectionStatusReport {
+  mode: ConnectionMode;
+  /** Rótulo curto e honesto pra tela — nunca "Conectado" sem verificação real. */
+  statusLabel: string;
+  connection: WhatsappConnection | null;
+  credentials: { verifyToken: boolean; appSecret: boolean; accessToken: boolean };
+  lastInbound: LastMessageInfo | null;
+  lastOutbound: LastMessageInfo | null;
+  /** Cada item em linguagem simples — o que falta e por quê, sem prometer correção automática. */
+  pendencies: string[];
+}
+
+/** Monta o status real da conexão de uma empresa — a fonte de verdade da tela "Conexão do WhatsApp". */
+export function buildConnectionStatusReport(companyId: number): ConnectionStatusReport {
+  const creds = getWhatsappCredentials();
+  const credentials = { verifyToken: !!creds.verifyToken, appSecret: !!creds.appSecret, accessToken: !!creds.accessToken };
+  const connection = listConnectionsForCompany(companyId).find((c) => c.active === 1) ?? null;
+  const allCredentialsPresent = credentials.verifyToken && credentials.appSecret && credentials.accessToken;
+
+  const mode: ConnectionMode = connection ? connection.environment : "DEMONSTRACAO";
+  const lastInbound = connection ? getLastRealInboundMessage(companyId) ?? null : null;
+  const lastOutbound = connection ? getLastRealOutboundMessage(companyId) ?? null : null;
+
+  const pendencies: string[] = [];
+  if (!connection) {
+    pendencies.push("Nenhum número foi associado a esta empresa ainda (feito por linha de comando — ver CONEXAO_WHATSAPP.md).");
+  }
+  if (!allCredentialsPresent) {
+    const faltando = [
+      !credentials.verifyToken && "token de verificação do webhook",
+      !credentials.appSecret && "segredo do aplicativo",
+      !credentials.accessToken && "token de acesso",
+    ].filter(Boolean);
+    pendencies.push(`Faltam credenciais no servidor (.env): ${faltando.join(", ")}.`);
+  }
+  if (connection) {
+    if (connection.last_verified_ok === null) {
+      pendencies.push('Esta conexão ainda não foi verificada — use "Verificar agora".');
+    } else if (connection.last_verified_ok === 0) {
+      pendencies.push(`A última verificação falhou: ${connection.last_verified_detail ?? "sem detalhes."}`);
+    }
+    if (!lastInbound) pendencies.push("Nenhuma mensagem real de cliente foi recebida por esta integração ainda.");
+    if (!lastOutbound) pendencies.push("Nenhuma resposta real foi enviada com sucesso por esta integração ainda.");
+  }
+  pendencies.push(
+    "A integração com o robô/atendimento atual (fora do Hub Action) ainda não foi comprovada — ver CONEXAO_WHATSAPP.md."
+  );
+
+  let statusLabel: string;
+  if (!connection) statusLabel = "Modo demonstração";
+  else if (!allCredentialsPresent) statusLabel = "Configuração incompleta";
+  else if (connection.last_verified_ok === 1) statusLabel = "Verificado pela Meta";
+  else if (connection.last_verified_ok === 0) statusLabel = "Falha na última verificação";
+  else statusLabel = "Ainda não verificado";
+
+  return { mode, statusLabel, connection, credentials, lastInbound, lastOutbound, pendencies };
 }
 
 // --- Validação de assinatura do webhook -------------------------------------

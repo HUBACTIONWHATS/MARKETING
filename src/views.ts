@@ -10,8 +10,13 @@ import type {
 } from "./attendance";
 import type { BusinessHours, WeekdayKey } from "./businessHours";
 import type { OpportunityWithDetails, PipelineStage } from "./crm";
+import type { ConnectionStatusReport } from "./whatsapp";
 import type { DashboardData, DashboardFilters } from "./dashboard";
-import type { Company, MembershipWithCompany, Role, User } from "./models";
+import type { AuditEntry } from "./access";
+import type { Company, CompanyAdminRow, CompanyPlan, CompanyUserRow, MembershipWithCompany, Role, User } from "./models";
+
+type PendingInvite = { email: string; role: Role; expires_at: string };
+type GeneratedLink = { label: string; url: string };
 
 type CompanyMember = { user_id: number; name: string; role: Role };
 
@@ -312,19 +317,69 @@ export function loginPage(error?: string): string {
           </label>
           <button type="submit">Entrar</button>
         </form>
+        <p class="meta" style="margin-top:1rem">Esqueceu a senha? Peça ao administrador da sua empresa (ou à Hub Action) um link de redefinição — não há envio automático de e-mail nesta versão.</p>
       </div>
     </div>`
   );
 }
 
-export function forbiddenPage(): string {
+export function forbiddenPage(message = "Você não tem permissão para acessar este recurso."): string {
   return page(
     "Acesso negado",
     `<div class="center-screen">
       <div class="card">
         <h1>403 — Acesso negado</h1>
-        <p style="color:#94a3b8">Você não tem permissão para acessar este recurso.</p>
+        <p style="color:#94a3b8">${escapeHtml(message)}</p>
         <p><a href="/">Voltar</a></p>
+      </div>
+    </div>`
+  );
+}
+
+/** Página simples de aviso (link inválido, conta criada, etc.). */
+export function messagePage(title: string, text: string, linkHref = "/login", linkLabel = "Ir para o login"): string {
+  return page(
+    title,
+    `<div class="center-screen">
+      <div class="card">
+        <h1>${escapeHtml(title)}</h1>
+        <p style="color:#94a3b8">${escapeHtml(text)}</p>
+        <p><a href="${linkHref}">${escapeHtml(linkLabel)}</a></p>
+      </div>
+    </div>`
+  );
+}
+
+/** Aceite de convite: quem recebeu o link cria a própria senha. */
+export function invitePage(opts: { token: string; email: string; companyName: string; error?: string }): string {
+  return page(
+    "Criar acesso — HUB ACTION",
+    `<div class="center-screen">
+      <div class="card">
+        <h1>Criar seu acesso</h1>
+        <p style="color:#94a3b8;font-size:0.85rem">Convite para <strong>${escapeHtml(opts.companyName)}</strong>, e-mail <strong>${escapeHtml(opts.email)}</strong>.</p>
+        ${opts.error ? `<p class="error">${escapeHtml(opts.error)}</p>` : ""}
+        <form method="post" action="/convite/${encodeURIComponent(opts.token)}">
+          <label>Seu nome<input type="text" name="name" required /></label>
+          <label>Senha (mínimo 8 caracteres)<input type="password" name="password" required minlength="8" /></label>
+          <button type="submit">Criar acesso</button>
+        </form>
+      </div>
+    </div>`
+  );
+}
+
+export function resetPage(opts: { token: string; error?: string }): string {
+  return page(
+    "Redefinir senha — HUB ACTION",
+    `<div class="center-screen">
+      <div class="card">
+        <h1>Redefinir senha</h1>
+        ${opts.error ? `<p class="error">${escapeHtml(opts.error)}</p>` : ""}
+        <form method="post" action="/redefinir/${encodeURIComponent(opts.token)}">
+          <label>Nova senha (mínimo 8 caracteres)<input type="password" name="password" required minlength="8" /></label>
+          <button type="submit">Salvar nova senha</button>
+        </form>
       </div>
     </div>`
   );
@@ -363,24 +418,149 @@ export function companySelectorPage(memberships: MembershipWithCompany[]): strin
   );
 }
 
-export function adminPage(companies: Company[]): string {
-  const rows = companies
+const PLAN_LABELS: Record<CompanyPlan, string> = {
+  DEMONSTRACAO: "Demonstração",
+  PILOTO: "Piloto",
+  ATIVO: "Ativo",
+};
+
+const ROLE_SHORT: Record<Role, string> = { COMPANY_ADMIN: "Administrador", AGENT: "Atendente" };
+
+/** Link gerado (convite/redefinição) — mostrado UMA vez, para quem gerou entregar ao destinatário. */
+function generatedLinkPanel(link: GeneratedLink): string {
+  return `<div class="panel" style="border-color:#0c4a6e">
+    <h3>${escapeHtml(link.label)}</h3>
+    <p class="meta">Copie e envie para a pessoa (WhatsApp, e-mail, etc.). Não há envio automático. O link só aparece agora; se perder, gere outro.</p>
+    <input type="text" readonly value="${escapeHtml(link.url)}" onclick="this.select()" />
+  </div>`;
+}
+
+/** Lista de usuários com ações (redefinir senha, ativar/desativar) — reaproveitada pela Hub Action e pelo admin da empresa. */
+function usersTable(users: CompanyUserRow[], actionBase: string, currentUserId: number): string {
+  if (users.length === 0) return '<p class="meta">Nenhum usuário ainda.</p>';
+  const rows = users
     .map(
-      (c) => `<li>
-        <span>${escapeHtml(c.name)}</span>
-        <span class="role-tag">${escapeHtml(c.slug)}</span>
-      </li>`
+      (u) => `<tr>
+        <td>${escapeHtml(u.name)}<br /><span class="meta">${escapeHtml(u.email)}</span></td>
+        <td>${ROLE_SHORT[u.role]}</td>
+        <td>${u.active ? '<span class="badge badge-humano">ativo</span>' : '<span class="badge badge-encerrado">desativado</span>'}</td>
+        <td style="white-space:nowrap">
+          <form method="post" action="${actionBase}/${u.user_id}/redefinir" style="display:inline"><button type="submit" class="btn btn-small">Link de nova senha</button></form>
+          ${
+            u.user_id === currentUserId
+              ? ""
+              : `<form method="post" action="${actionBase}/${u.user_id}/ativo" style="display:inline"><input type="hidden" name="active" value="${u.active ? "0" : "1"}" /><button type="submit" class="btn btn-small ${u.active ? "btn-danger" : ""}">${u.active ? "Desativar" : "Reativar"}</button></form>`
+          }
+        </td>
+      </tr>`
+    )
+    .join("");
+  return `<div style="overflow-x:auto"><table class="hours-table">
+    <thead><tr><th>Usuário</th><th>Perfil</th><th>Status</th><th>Ações</th></tr></thead>
+    <tbody>${rows}</tbody>
+  </table></div>`;
+}
+
+function inviteForm(action: string, allowAdmin: boolean): string {
+  return `<form method="post" action="${action}" class="form-grid" style="margin-top:0.75rem">
+    <label>E-mail do convidado<input type="email" name="email" required /></label>
+    <label>Perfil<select name="role"><option value="AGENT">Atendente</option>${allowAdmin ? '<option value="COMPANY_ADMIN">Administrador da empresa</option>' : ""}</select></label>
+    <div style="align-self:end"><button type="submit" class="btn btn-small btn-primary">Gerar link de convite</button></div>
+  </form>`;
+}
+
+function pendingInvitesList(invites: PendingInvite[]): string {
+  if (invites.length === 0) return "";
+  return `<p class="meta" style="margin-top:0.6rem">Convites ainda não usados: ${invites
+    .map((i) => `${escapeHtml(i.email)} (${ROLE_SHORT[i.role]}, vale até ${new Date(i.expires_at).toLocaleDateString("pt-BR")})`)
+    .join("; ")}.</p>`;
+}
+
+export function adminPage(opts: {
+  currentUserId: number;
+  companies: CompanyAdminRow[];
+  statuses: Map<number, ConnectionStatusReport>;
+  usersByCompany: Map<number, CompanyUserRow[]>;
+  invitesByCompany: Map<number, PendingInvite[]>;
+  generatedLink?: GeneratedLink;
+  notice?: string;
+  error?: string;
+}): string {
+  const companyPanels = opts.companies
+    .map((c) => {
+      const status = opts.statuses.get(c.id);
+      return `<div class="panel">
+        <div class="toolbar" style="margin-bottom:0.5rem">
+          <div>
+            <h3 style="text-transform:none;color:#f8fafc;font-size:1rem;margin:0">${escapeHtml(c.name)} <span class="meta">${escapeHtml(c.slug)}</span></h3>
+            <div style="display:flex;gap:0.4rem;flex-wrap:wrap;margin-top:0.35rem">
+              <span class="badge">${PLAN_LABELS[c.plan]}</span>
+              ${c.suspended ? '<span class="badge badge-encerrado">suspensa</span>' : ""}
+              ${status ? `<span class="badge">WhatsApp: ${MODE_LABELS[status.mode]} · ${escapeHtml(status.statusLabel)}</span>` : ""}
+              <span class="badge">${c.member_count} usuário(s) · ${c.conversation_count} conversa(s)</span>
+            </div>
+          </div>
+        </div>
+        <form method="post" action="/admin/empresas/${c.id}/plano" class="form-grid">
+          <label>Plano (controle manual, sem cobrança)
+            <select name="plan">${(Object.keys(PLAN_LABELS) as CompanyPlan[]).map((p) => `<option value="${p}" ${p === c.plan ? "selected" : ""}>${PLAN_LABELS[p]}</option>`).join("")}</select>
+          </label>
+          <label>Observações<input type="text" name="plan_notes" value="${escapeHtml(c.plan_notes ?? "")}" placeholder="ex.: piloto combinado até dd/mm" /></label>
+          <label class="checkbox-line" style="align-self:end"><input type="checkbox" name="suspended" value="1" ${c.suspended ? "checked" : ""} /> Suspender acesso</label>
+          <div style="align-self:end"><button type="submit" class="btn btn-small">Salvar plano</button></div>
+        </form>
+        <h4 style="margin:1rem 0 0.4rem;font-size:0.8rem;color:#94a3b8;text-transform:uppercase">Usuários</h4>
+        ${usersTable(opts.usersByCompany.get(c.id) ?? [], `/admin/usuarios`, opts.currentUserId)}
+        ${pendingInvitesList(opts.invitesByCompany.get(c.id) ?? [])}
+        ${inviteForm(`/admin/empresas/${c.id}/convites`, true)}
+      </div>`;
+    })
+    .join("");
+
+  return page(
+    "Painel da Hub Action",
+    `${IS_DEMO ? '<div class="demo-banner" style="margin:0;border-radius:0">⚠️ Ambiente de teste — dados fictícios (modo de demonstração), sem conexão com WhatsApp real.</div>' : ""}
+    <div style="max-width:1000px;margin:0 auto;padding:1.5rem">
+      <div class="toolbar">
+        <h2 style="margin:0">Painel da Hub Action</h2>
+        <div style="display:flex;gap:0.5rem">
+          <a href="/admin/log" class="btn btn-small">Log de auditoria</a>
+          <form method="post" action="/logout"><button type="submit" class="btn btn-small">Sair</button></form>
+        </div>
+      </div>
+      <p class="meta">Empresas, usuários, planos (manuais) e situação da conexão do WhatsApp. O conteúdo das conversas de cada empresa não é exibido aqui.</p>
+      ${opts.notice ? `<p class="success">${escapeHtml(opts.notice)}</p>` : ""}
+      ${opts.error ? `<p class="error">${escapeHtml(opts.error)}</p>` : ""}
+      ${opts.generatedLink ? generatedLinkPanel(opts.generatedLink) : ""}
+      <form method="post" action="/admin/empresas" class="panel inline-form">
+        <input type="text" name="name" required placeholder="Nome da nova empresa cliente" />
+        <button type="submit" class="btn btn-primary">Criar empresa</button>
+      </form>
+      ${companyPanels || '<p class="meta">Nenhuma empresa cadastrada.</p>'}
+    </div>`
+  );
+}
+
+export function auditLogPage(entries: AuditEntry[], backHref: string): string {
+  const rows = entries
+    .map(
+      (e) => `<tr>
+        <td style="white-space:nowrap">${new Date(e.created_at).toLocaleString("pt-BR")}</td>
+        <td>${escapeHtml(e.action)}</td>
+        <td>${e.company_name ? escapeHtml(e.company_name) : "—"}</td>
+        <td>${e.user_name ? escapeHtml(e.user_name) : "—"}</td>
+        <td>${e.detail ? escapeHtml(e.detail) : ""}</td>
+      </tr>`
     )
     .join("");
   return page(
-    "Painel da plataforma — HUB ACTION",
-    `<div class="center-screen">
-      <div class="card" style="max-width:480px">
-        <h1>Painel da plataforma</h1>
-        <p style="color:#94a3b8;font-size:0.85rem">Empresas cadastradas. O conteúdo das conversas de cada empresa não é exibido aqui.</p>
-        <ul class="list">${rows || "<li>Nenhuma empresa cadastrada.</li>"}</ul>
-        <p><a href="/logout">Sair</a></p>
-      </div>
+    "Log de auditoria",
+    `<div style="max-width:1000px;margin:0 auto;padding:1.5rem">
+      <div class="toolbar"><h2 style="margin:0">Log de auditoria</h2><a href="${backHref}" class="btn btn-small">&larr; Voltar</a></div>
+      <div style="overflow-x:auto"><table class="hours-table">
+        <thead><tr><th>Quando</th><th>Ação</th><th>Empresa</th><th>Usuário</th><th>Detalhe</th></tr></thead>
+        <tbody>${rows || '<tr><td colspan="5" class="meta">Nada registrado ainda.</td></tr>'}</tbody>
+      </table></div>
     </div>`
   );
 }
@@ -508,7 +688,7 @@ export function inboxPage(opts: { company: Company; user: User; role: Role; item
           <div><strong>${escapeHtml(c.contact_name)}</strong> <span class="meta">${escapeHtml(c.contact_phone)}</span></div>
           <div class="meta">${preview}</div>
         </div>
-        <span style="display:flex;gap:0.4rem;flex-wrap:wrap;justify-content:flex-end">${waiting}<span class="badge ${info.badge}">${info.label}</span></span>
+        <span style="display:flex;gap:0.4rem;flex-wrap:wrap;justify-content:flex-end">${c.channel === "SIMULADO" ? '<span class="badge" title="Conversa simulada — não é WhatsApp real">simulada</span>' : ""}${waiting}<span class="badge ${info.badge}">${info.label}</span></span>
       </a></li>`;
     })
     .join("");
@@ -672,6 +852,7 @@ export function conversationDetailPage(opts: {
           <h2 style="margin:0 0 0.25rem">${escapeHtml(opts.contact.name)} <span class="meta">${escapeHtml(opts.contact.phone)}</span></h2>
           <span class="badge ${info.badge}">${info.label}</span>
           ${conv.mode === "MANUAL" ? '<span class="badge">modo manual</span>' : ""}
+          ${conv.channel === "SIMULADO" ? '<span class="badge">conversa simulada — não é WhatsApp real</span>' : '<span class="badge badge-humano">WhatsApp oficial</span>'}
         </div>
         <div>${assumeForm}</div>
       </div>
@@ -710,15 +891,100 @@ const COMMON_TIMEZONES = [
   "America/Rio_Branco",
 ];
 
+const MODE_LABELS: Record<ConnectionStatusReport["mode"], string> = {
+  DEMONSTRACAO: "Demonstração",
+  TESTE: "Teste (número de teste da Meta)",
+  PRODUCAO: "Produção",
+};
+
+/** Área "Conexão do WhatsApp" — exclusiva de administrador; status sempre calculado, nunca "Conectado" por campo preenchido. */
+function whatsappConnectionPanel(companyId: number, report: ConnectionStatusReport, verifySuccess?: string, verifyError?: string): string {
+  const statusBadgeClass =
+    report.statusLabel === "Verificado pela Meta"
+      ? "badge-humano"
+      : report.statusLabel === "Falha na última verificação"
+        ? "badge-encerrado"
+        : "badge-aguardando";
+
+  const credRow = (label: string, present: boolean) =>
+    `<li><span>${escapeHtml(label)}</span> <span class="badge ${present ? "badge-humano" : "badge-encerrado"}">${present ? "configurado" : "não configurado"}</span></li>`;
+
+  const fmt = (iso: string) => new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+
+  return `<div class="panel">
+    <h3>Conexão do WhatsApp</h3>
+    <p class="meta" style="margin-top:-0.3rem">Visível só para administradores da empresa. Credenciais nunca aparecem aqui — só se estão configuradas ou não.</p>
+
+    <div style="display:flex;gap:0.75rem;flex-wrap:wrap;margin:0.75rem 0">
+      <span class="badge">${MODE_LABELS[report.mode]}</span>
+      <span class="badge ${statusBadgeClass}">${escapeHtml(report.statusLabel)}</span>
+    </div>
+
+    ${
+      report.connection
+        ? `<p class="meta">Número associado: <strong>${report.connection.display_phone_number ? escapeHtml(report.connection.display_phone_number) : report.connection.phone_number_id}</strong></p>`
+        : `<p class="meta">Nenhum número associado — a empresa está em modo demonstração.</p>`
+    }
+
+    <h4 style="margin:1rem 0 0.4rem;font-size:0.85rem;color:#94a3b8;text-transform:uppercase">Credenciais no servidor</h4>
+    <ul class="list" style="margin-bottom:0.75rem">
+      ${credRow("Token de verificação do webhook", report.credentials.verifyToken)}
+      ${credRow("Segredo do aplicativo", report.credentials.appSecret)}
+      ${credRow("Token de acesso (envio)", report.credentials.accessToken)}
+    </ul>
+
+    <h4 style="margin:1rem 0 0.4rem;font-size:0.85rem;color:#94a3b8;text-transform:uppercase">Evidências reais</h4>
+    <p class="meta">Última mensagem recebida: ${report.lastInbound ? `${fmt(report.lastInbound.createdAt)} — "${escapeHtml(report.lastInbound.preview.slice(0, 60))}"` : "nenhuma ainda"}</p>
+    <p class="meta">Última resposta enviada com sucesso: ${report.lastOutbound ? fmt(report.lastOutbound.createdAt) : "nenhuma ainda"}</p>
+
+    ${
+      report.connection
+        ? `<form method="post" action="/empresa/${companyId}/configuracoes/whatsapp/verificar" style="margin:0.75rem 0">
+            <button type="submit" class="btn btn-small">Verificar agora com a Meta</button>
+            ${report.connection.last_verified_at ? `<span class="meta"> última checagem: ${fmt(report.connection.last_verified_at)}</span>` : ""}
+          </form>`
+        : ""
+    }
+    ${verifySuccess ? `<p class="success">${escapeHtml(verifySuccess)}</p>` : ""}
+    ${verifyError ? `<p class="error">${escapeHtml(verifyError)}</p>` : ""}
+
+    <h4 style="margin:1rem 0 0.4rem;font-size:0.85rem;color:#94a3b8;text-transform:uppercase">Pendências e o que falta (em linguagem simples)</h4>
+    <ul class="list">
+      ${report.pendencies.map((p) => `<li>${escapeHtml(p)}</li>`).join("")}
+    </ul>
+    <p class="meta" style="margin-top:0.75rem">
+      Se a Meta indicar um erro de cadastro (ex.: número já registrado em outro aplicativo), essa tela não resolve
+      isso automaticamente — o ajuste é feito direto no painel da Meta for Developers.
+      Passo a passo completo para concluir a conexão: arquivo <strong>CONEXAO_WHATSAPP.md</strong> no projeto.
+    </p>
+  </div>`;
+}
+
 export function settingsPage(opts: {
   company: Company;
   user: User;
   role: Role;
   canEdit: boolean;
   hours: BusinessHours;
+  whatsapp?: ConnectionStatusReport;
+  whatsappVerifySuccess?: string;
+  whatsappVerifyError?: string;
+  team?: { users: CompanyUserRow[]; invites: PendingInvite[]; currentUserId: number; generatedLink?: GeneratedLink; notice?: string; error?: string };
   error?: string;
   success?: string;
 }): string {
+  const teamPanel = opts.team
+    ? `<div class="panel">
+        <h3>Equipe</h3>
+        <p class="meta" style="margin-top:-0.3rem">Convide atendentes por link e gere links de nova senha. Não há envio automático de e-mail: você entrega o link.</p>
+        ${opts.team.notice ? `<p class="success">${escapeHtml(opts.team.notice)}</p>` : ""}
+        ${opts.team.error ? `<p class="error">${escapeHtml(opts.team.error)}</p>` : ""}
+        ${opts.team.generatedLink ? generatedLinkPanel(opts.team.generatedLink) : ""}
+        ${usersTable(opts.team.users, `/empresa/${opts.company.id}/configuracoes/equipe`, opts.team.currentUserId)}
+        ${pendingInvitesList(opts.team.invites)}
+        ${inviteForm(`/empresa/${opts.company.id}/configuracoes/equipe/convites`, true)}
+      </div>`
+    : "";
   const tzOptions = COMMON_TIMEZONES.map(
     (tz) => `<option value="${tz}" ${tz === opts.company.timezone ? "selected" : ""}>${tz}</option>`
   ).join("");
@@ -753,7 +1019,9 @@ export function settingsPage(opts: {
           <tbody>${rows}</tbody>
         </table>
         ${opts.canEdit ? '<div style="margin-top:1rem"><button type="submit" class="btn btn-primary">Salvar</button></div>' : '<p class="meta" style="margin-top:1rem">Apenas o administrador da empresa pode editar.</p>'}
-      </form>`,
+      </form>
+      ${opts.canEdit ? teamPanel : ""}
+      ${opts.canEdit && opts.whatsapp ? whatsappConnectionPanel(opts.company.id, opts.whatsapp, opts.whatsappVerifySuccess, opts.whatsappVerifyError) : ""}`,
   });
 }
 
