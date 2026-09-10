@@ -145,6 +145,26 @@ test("modo manual: primeira mensagem do cliente já inicia a espera (sem robô)"
   assert.equal(A.getConversation(companyId, conv.id)?.status, "AGUARDANDO_HUMANO");
 });
 
+test("encerrar atendimento fecha a espera aberta como ENCERRADO_SEM_RESPOSTA (não conta como resposta humana)", () => {
+  const companyId = makeCompany();
+  const contact = A.findOrCreateContact(companyId, "Cliente Encerrado", "+55 11 90000-0008");
+  const conv = A.createConversation(companyId, contact.id, "AUTOMATICO");
+
+  A.addMessage({ companyId, conversationId: conv.id, authorType: "CLIENTE", body: "quero atendente" });
+  A.closeConversation(companyId, conv.id);
+
+  const summary = A.summarizeWait(conv.id, "America/Sao_Paulo", HOURS);
+  assert.equal(summary.isWaiting, false, "conversa encerrada não pode continuar 'aguardando agora'");
+  const episode = A.listWaitEpisodes(conv.id)[0];
+  assert.equal(episode.ended_reason, "ENCERRADO_SEM_RESPOSTA");
+  assert.equal(A.getConversation(companyId, conv.id)?.status, "ENCERRADO");
+
+  // Reabrir com novo pedido cria um episódio novo, sem herdar o anterior.
+  A.addMessage({ companyId, conversationId: conv.id, authorType: "CLIENTE", body: "voltei, quero atendente" });
+  assert.equal(A.listWaitEpisodes(conv.id).length, 2);
+  assert.equal(A.summarizeWait(conv.id, "America/Sao_Paulo", HOURS).isWaiting, true);
+});
+
 test("autoria desconhecida nunca é tratada como humana (não encerra espera)", () => {
   const companyId = makeCompany();
   const contact = A.findOrCreateContact(companyId, "Cliente Desconhecido", "+55 11 90000-0007");

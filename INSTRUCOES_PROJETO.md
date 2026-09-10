@@ -43,6 +43,6 @@ Ver detalhes e justificativa em [PROGRESSO.md](PROGRESSO.md).
 
 ## Como continuar
 
-1. Ler [PROGRESSO.md](PROGRESSO.md) para saber a última etapa concluída e a próxima tarefa.
+1. Ler [PROGRESSO.md](PROGRESSO.md) para saber a última etapa concluída e a próxima tarefa. O roteiro manual para testadores não técnicos fica em [ROTEIRO_TESTE.md](ROTEIRO_TESTE.md) — manter atualizado quando uma etapa mudar o fluxo de uso.
 2. Executar apenas a próxima tarefa indicada, salvo instrução diferente do usuário.
 3. Atualizar PROGRESSO.md ao final.

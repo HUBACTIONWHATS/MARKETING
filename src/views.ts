@@ -406,9 +406,14 @@ export function appShell(opts: {
       `<a href="/empresa/${opts.company.id}/${item.key}" class="${item.key === opts.active ? "active" : ""}">${item.label}</a>`
   ).join("");
 
+  // Modo de demonstração: mesmo critério do simulador (fora de produção, tudo é dado fictício).
+  const demoBanner = IS_DEMO
+    ? `<div class="demo-banner" style="margin:0;border-radius:0">⚠️ Ambiente de teste — dados fictícios (modo de demonstração), sem conexão com WhatsApp real.</div>`
+    : "";
+
   return page(
     `${opts.company.name} — HUB ACTION`,
-    `<div class="layout">
+    `${demoBanner}<div class="layout">
       <aside class="sidebar">
         <div class="brand">HUB ACTION</div>
         <nav>${nav}</nav>
@@ -426,6 +431,8 @@ export function appShell(opts: {
     </div>`
   );
 }
+
+const IS_DEMO = process.env.NODE_ENV !== "production";
 
 export function emptyState(title: string, description: string): string {
   return `<div class="empty-state">
@@ -474,12 +481,15 @@ export function inboxPage(opts: { company: Company; user: User; role: Role; item
     .map((c) => {
       const info = STATUS_INFO[c.status];
       const preview = c.last_message_preview ? escapeHtml(c.last_message_preview).slice(0, 90) : "Sem mensagens";
+      const waiting = c.open_wait_started_at
+        ? `<span class="badge badge-aguardando">espera aberta há ${formatDuration(Date.now() - new Date(c.open_wait_started_at).getTime())}</span>`
+        : "";
       return `<li><a href="/empresa/${opts.company.id}/conversas/${c.id}">
         <div>
           <div><strong>${escapeHtml(c.contact_name)}</strong> <span class="meta">${escapeHtml(c.contact_phone)}</span></div>
           <div class="meta">${preview}</div>
         </div>
-        <span class="badge ${info.badge}">${info.label}</span>
+        <span style="display:flex;gap:0.4rem;flex-wrap:wrap;justify-content:flex-end">${waiting}<span class="badge ${info.badge}">${info.label}</span></span>
       </a></li>`;
     })
     .join("");
@@ -691,9 +701,26 @@ function formatCurrencyCents(cents: number): string {
   return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(cents / 100);
 }
 
-function formatDateShort(iso: string | null): string | null {
+/** Data/hora curta no fuso da empresa (mesmo fuso usado para gravar o agendamento). */
+function formatDateShort(iso: string | null, timeZone: string): string | null {
   if (!iso) return null;
-  return new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+  return new Date(iso).toLocaleString("pt-BR", { timeZone, day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+/** Valor para <input type="datetime-local"> ("YYYY-MM-DDTHH:MM") no fuso da empresa. */
+function toDatetimeLocal(iso: string | null, timeZone: string): string {
+  if (!iso) return "";
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).formatToParts(new Date(iso));
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? "00";
+  return `${get("year")}-${get("month")}-${get("day")}T${get("hour")}:${get("minute")}`;
 }
 
 export function crmPage(opts: {
@@ -705,6 +732,7 @@ export function crmPage(opts: {
   members: CompanyMember[];
   error?: string;
 }): string {
+  const tz = opts.company.timezone;
   const memberOptions = (selected: number | null) =>
     `<option value="">Sem responsável</option>` +
     opts.members
@@ -722,7 +750,7 @@ export function crmPage(opts: {
       const totalCents = items.reduce((sum, o) => sum + o.value_cents, 0);
       const cards = items
         .map((o) => {
-          const scheduled = formatDateShort(o.scheduled_at);
+          const scheduled = formatDateShort(o.scheduled_at, tz);
           return `<div class="opp-card">
             <div class="title">${escapeHtml(o.title)}</div>
             <div class="meta-row">
@@ -742,7 +770,7 @@ export function crmPage(opts: {
               <form method="post" action="/empresa/${opts.company.id}/crm/oportunidades/${o.id}/editar" class="form-grid" style="margin-top:0.5rem">
                 <label>Responsável<select name="responsible_user_id">${memberOptions(o.responsible_user_id)}</select></label>
                 <label>Valor (R$)<input type="number" step="0.01" min="0" name="value" value="${(o.value_cents / 100).toFixed(2)}" /></label>
-                <label>Agendamento<input type="datetime-local" name="scheduled_at" value="${o.scheduled_at ? o.scheduled_at.slice(0, 16) : ""}" /></label>
+                <label>Agendamento<input type="datetime-local" name="scheduled_at" value="${toDatetimeLocal(o.scheduled_at, tz)}" /></label>
                 <div style="align-self:end"><button type="submit" class="btn btn-small">Salvar</button></div>
               </form>
             </details>
@@ -876,9 +904,8 @@ export function dashboardPage(opts: {
     <div class="field"><button type="submit" class="btn btn-primary">Aplicar filtros</button></div>
   </form>`;
 
-  const demoBanner = opts.isDev
-    ? `<div class="demo-banner">⚠️ Ambiente de teste — todos os dados aqui são fictícios (modo de demonstração), sem conexão com WhatsApp real.</div>`
-    : "";
+  // O aviso de dados fictícios agora é global (appShell); aqui só reforça no cabeçalho.
+  const demoBanner = opts.isDev ? `<p class="meta" style="margin:-0.5rem 0 1rem">Indicadores calculados sobre dados de demonstração.</p>` : "";
 
   if (!opts.data || !opts.data.hasAnyData) {
     return appShell({
@@ -928,12 +955,12 @@ export function dashboardPage(opts: {
     <div class="metrics-grid">
       ${metricCard(
         "Média 1ª resposta",
-        d.firstResponse.avgMinutes !== null ? formatMinutes(d.firstResponse.avgMinutes) : "—",
+        d.firstResponse.avgMinutes !== null ? formatDuration(d.firstResponse.avgMinutes * 60000) : "—",
         `Média do tempo corrido entre o pedido de atendente e a 1ª resposta humana enviada com sucesso (${d.firstResponse.count} atendimento(s) no período).`
       )}
       ${metricCard(
         "Mediana 1ª resposta",
-        d.firstResponse.medianMinutes !== null ? formatMinutes(d.firstResponse.medianMinutes) : "—",
+        d.firstResponse.medianMinutes !== null ? formatDuration(d.firstResponse.medianMinutes * 60000) : "—",
         "Valor do meio da mesma lista de tempos — menos sensível a casos extremos do que a média."
       )}
       ${metricCard(

@@ -15,7 +15,7 @@ import {
   summarizeWait,
   type ConversationMode,
 } from "./attendance";
-import { parseBusinessHours, type BusinessHours, type WeekdayKey } from "./businessHours";
+import { parseBusinessHours, zonedTimeToUtc, type BusinessHours, type WeekdayKey } from "./businessHours";
 import {
   addStage,
   createOpportunity,
@@ -60,7 +60,8 @@ const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 const IS_DEV = process.env.NODE_ENV !== "production";
 
 app.use(express.urlencoded({ extended: false }));
-app.use(express.static(path.join(__dirname, "..", "public")));
+// index:false — sem isso um index.html em public/ responderia "/" antes do redirecionamento para o login.
+app.use(express.static(path.join(__dirname, "..", "public"), { index: false }));
 app.use(
   session({
     secret: process.env.SESSION_SECRET || "dev-secret-nao-usar-em-producao",
@@ -352,6 +353,13 @@ app.get("/empresa/:companyId/crm", requireCompanyAccess, (_req, res) => {
   );
 });
 
+/** "YYYY-MM-DDTHH:MM" digitado no formulário é interpretado no fuso da empresa (não no do servidor). */
+function parseScheduledAt(value: string | undefined, timeZone: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/.exec(value || "");
+  if (!m) return null;
+  return zonedTimeToUtc(Number(m[1]), Number(m[2]), Number(m[3]), Number(m[4]), Number(m[5]), timeZone).toISOString();
+}
+
 function parseReais(value: string | undefined): number {
   const n = Number((value || "0").replace(",", "."));
   return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) : 0;
@@ -371,7 +379,7 @@ app.post("/empresa/:companyId/crm/oportunidades", requireCompanyAccess, (req, re
     title: body.title,
     valueCents: parseReais(body.value),
     responsibleUserId: body.responsible_user_id ? Number(body.responsible_user_id) : null,
-    scheduledAt: body.scheduled_at ? new Date(body.scheduled_at).toISOString() : null,
+    scheduledAt: parseScheduledAt(body.scheduled_at, company.timezone),
   });
   res.redirect(`/empresa/${company.id}/crm`);
 });
@@ -403,7 +411,7 @@ app.post("/empresa/:companyId/crm/oportunidades/:opportunityId/editar", requireC
   updateOpportunityDetails(company.id, Number(req.params.opportunityId), {
     responsibleUserId: body.responsible_user_id ? Number(body.responsible_user_id) : null,
     valueCents: parseReais(body.value),
-    scheduledAt: body.scheduled_at ? new Date(body.scheduled_at).toISOString() : null,
+    scheduledAt: parseScheduledAt(body.scheduled_at, company.timezone),
   });
   res.redirect(`/empresa/${company.id}/crm`);
 });

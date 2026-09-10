@@ -44,7 +44,7 @@ export interface WaitEpisode {
   conversation_id: number;
   started_at: string;
   ended_at: string | null;
-  ended_reason: "RESPOSTA_HUMANA" | null;
+  ended_reason: "RESPOSTA_HUMANA" | "ENCERRADO_SEM_RESPOSTA" | null;
   ended_by_user_id: number | null;
   created_at: string;
 }
@@ -118,13 +118,18 @@ export interface ConversationListItem extends Conversation {
   contact_phone: string;
   last_message_preview: string | null;
   last_message_at: string | null;
+  /** started_at do episódio de espera aberto, se houver — mesmo dado que o dashboard usa. */
+  open_wait_started_at: string | null;
 }
 
 export function listConversations(companyId: number): ConversationListItem[] {
   return db
     .prepare(
       `SELECT co.*, ct.name AS contact_name, ct.phone AS contact_phone,
-              lm.body AS last_message_preview, lm.created_at AS last_message_at
+              lm.body AS last_message_preview, lm.created_at AS last_message_at,
+              (SELECT started_at FROM wait_episodes we
+                 WHERE we.conversation_id = co.id AND we.ended_at IS NULL
+                 ORDER BY we.id DESC LIMIT 1) AS open_wait_started_at
        FROM conversations co
        JOIN contacts ct ON ct.id = co.contact_id
        LEFT JOIN messages lm ON lm.id = (
@@ -231,10 +236,21 @@ export function assumeConversation(companyId: number, conversationId: number, us
   );
 }
 
+/**
+ * Encerra o atendimento. Se havia espera aberta, o episódio é fechado com
+ * ENCERRADO_SEM_RESPOSTA — isso NÃO é uma resposta humana (não entra nas
+ * métricas de 1ª resposta), só impede que a conversa continue contando como
+ * "aguardando agora" depois de encerrada.
+ */
 export function closeConversation(companyId: number, conversationId: number): void {
   const convo = getConversation(companyId, conversationId);
   if (!convo) return;
-  setConversationStatus(conversationId, "ENCERRADO", nowIso());
+  const at = nowIso();
+  const open = findOpenWaitEpisode(conversationId);
+  if (open) {
+    db.prepare("UPDATE wait_episodes SET ended_at = ?, ended_reason = 'ENCERRADO_SEM_RESPOSTA' WHERE id = ?").run(at, open.id);
+  }
+  setConversationStatus(conversationId, "ENCERRADO", at);
 }
 
 export interface AddMessageInput {
@@ -292,6 +308,9 @@ export function addMessage(input: AddMessageInput): Message {
     if (nextStatus) setConversationStatus(input.conversationId, nextStatus, at);
   }
   // ROBO, AUTOMACAO, DESCONHECIDO: mensagem registrada, sem efeito no estado/espera.
+
+  // Toda mensagem conta como atividade: mantém a caixa de entrada ordenada pela conversa mais recente.
+  db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(at, input.conversationId);
 
   return db.prepare("SELECT * FROM messages WHERE id = ?").get(info.lastInsertRowid) as Message;
 }

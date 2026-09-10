@@ -178,4 +178,58 @@ Login `admin@empresa-a.dev` / `trocar123` → CRM (funil com 1 oportunidade de d
 
 - Métricas de tempo de resposta usam minutos corridos, não descontam fora do expediente (assumido e explicado na tela; o detalhe por conversa já mostra a versão com expediente).
 - Filtro de período usa o dia de calendário no fuso da empresa, mas a hora exata de virada de dia em transições de horário de verão não é garantida (mesma limitação já documentada em `businessHours.ts`; irrelevante para o fuso padrão).
-- Aguardando a Etapa 5 (próximo comando do usuário). Não iniciar sem instrução.
+## Etapa concluída: Etapa 5 — Revisão do fluxo local completo
+
+Sem ampliação de escopo. Revisão feita com banco zerado, roteiro de ponta a ponta via HTTP (~60 checagens) e reinício do servidor no meio. Roteiro para pessoa não técnica: [ROTEIRO_TESTE.md](ROTEIRO_TESTE.md).
+
+### Problemas encontrados e corrigidos
+
+1. **`/` mostrava a página placeholder da Etapa 0** em vez de mandar para o login: o `express.static` servia `public/index.html` antes da rota. Corrigido com `{ index: false }` e remoção do arquivo (a tela de login já mostra o nome do projeto). Era o primeiro obstáculo para um testador não técnico.
+2. **Encerrar uma conversa com espera aberta deixava o episódio aberto para sempre** → "Aguardando humano" e "Maior espera atual" ficavam inflados no dashboard, e a tela da conversa mostrava "Aguardando agora" mesmo encerrada. Nova migração `0004_wait_ended_reason.sql` (recria `wait_episodes`, SQLite não altera `CHECK`) com o motivo `ENCERRADO_SEM_RESPOSTA`. Isso **não** conta como resposta humana (as métricas de 1ª resposta continuam só com `RESPOSTA_HUMANA`); reabrir a conversa com novo pedido cria episódio novo. Teste automatizado adicionado.
+3. **Caixa de entrada não mostrava a espera** — o dashboard dizia "1 aguardando" enquanto a lista só mostrava o status "Em atendimento humano" (após assumir). Agora cada linha exibe "espera aberta há X", usando o mesmo dado do dashboard.
+4. **Ordem da caixa de entrada não mudava com mensagens novas** (só com mudança de status). `addMessage` agora atualiza `updated_at` sempre.
+5. **Média/mediana no dashboard arredondavam para "0m"** respostas abaixo de 1 minuto, enquanto o detalhe da conversa mostrava segundos. Passam a usar o mesmo `formatDuration` (ex.: "3s").
+6. **Agendamento da oportunidade era interpretado no fuso do servidor** e o campo de edição mostrava o horário em UTC (digitava 14:30, reabria 17:30). Agora entrada e exibição usam o fuso da empresa (`zonedTimeToUtc`, já existente).
+7. **Aviso de dados fictícios** só existia no Dashboard; agora é global (topo de todas as telas, fora de produção).
+
+### O que foi validado (tudo OK)
+
+- Login (senha errada → 401), `/` → `/login`, admin da plataforma só vê `/admin` (403 nas empresas).
+- Isolamento: Empresa A recebe 403 em conversas/CRM/dashboard da B; conversa da B pelo id na rota da A → 404; B não consegue mover oportunidade da A; contatos da A invisíveis para B; filtro de atendente da B não vaza nada na A.
+- Cadastro de contato + oportunidade com valor `350,00`, responsável e agendamento 14:30 (exibe e reedita 14:30).
+- Pedido de humano: mensagem comum e negação ("não quero atendente") não iniciam; pedido por texto inicia; pedido repetido não cria segundo episódio.
+- Robô, assumir e falha de envio não encerram; resposta humana encerra e muda para "Aguardando cliente".
+- Persistência: após reiniciar o servidor, mensagens, falha registrada, oportunidade e cronômetro (lido do banco, bateu ao segundo) continuam; indicadores idênticos antes/depois. Sessão de login expira ao reiniciar (armazenada em memória — esperado nesta fase).
+- Consistência dos indicadores: contatos 4 / oportunidades 2 / agendamentos 1 / aguardando 0 (após responder e encerrar) / encerrados sem resposta 1 / 100% no prazo — todos batendo com as ações feitas; "aguardando" do dashboard = quantidade de etiquetas "espera aberta" na caixa de entrada.
+- `npm test`: 18/18.
+
+### Estado atual — o que é simulado, o que funciona, o que falta
+
+**Simulado (só existe em modo de demonstração, some com `NODE_ENV=production`):**
+- Cliente enviando mensagem, robô respondendo, clique em "Falar com atendente", falha de envio — botões no painel amarelo.
+- As duas empresas, os usuários e as conversas/oportunidades iniciais (seed).
+
+**Funcionando de verdade (lógica real, não depende do simulador):**
+- Login com senha, sessão, três perfis, isolamento por empresa no servidor e no banco.
+- Caixa de entrada, assumir, responder, encerrar; estados do atendimento; autoria por mensagem.
+- Medição da espera por humano com todas as regras do briefing, cronômetro persistido, tempo corrido × tempo de expediente, fuso e expediente por empresa.
+- Detecção de pedido de atendente por texto, com negações (regras, sem IA).
+- CRM: funil configurável, oportunidade separada de contato (responsável, valor, agendamento, motivo da perda).
+- Dashboard com os nove indicadores, filtros por período/atendente, meta de SLA editável.
+
+**Falta para uso real (fora do escopo atual, não iniciar sem instrução):**
+- Conexão com WhatsApp real (API oficial ou robô externo) — a interface de integração ainda não foi desenhada; nada externo é chamado hoje.
+- Cadastro de empresas e usuários pela interface (hoje só via seed); troca/recuperação de senha.
+- Sessões persistentes (hoje em memória: reiniciar desloga todo mundo) e `SESSION_SECRET` real; HTTPS.
+- Hospedagem e banco para acesso externo (migração SQLite → PostgreSQL prevista; decidir plano só na etapa de publicação, consultando preços/limites atuais).
+- Painel da plataforma com saúde operacional (hoje só lista as empresas); Relatórios por período (tela ainda vazia).
+- Autoria `AUTOMACAO` e "nota interna" existem no modelo mas sem tela.
+- Notificações/alertas de espera longa; anexos/mídia nas mensagens.
+
+### Como testar
+
+Ver [ROTEIRO_TESTE.md](ROTEIRO_TESTE.md) (iniciar: `npm run dev`; encerrar: Ctrl + C).
+
+### Pendências / próxima tarefa
+
+- Aguardando a Etapa 6 (próximo comando do usuário). Não iniciar sem instrução.
