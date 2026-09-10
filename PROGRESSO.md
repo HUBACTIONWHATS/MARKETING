@@ -401,14 +401,20 @@ Autorizada pelo usuário: Neon (gratuito) para o piloto, Render gratuito **só c
 - Ponta a ponta no Postgres com a aplicação real: seed → login das três contas → isolamento (A não vê B, B não vê A, Hub Action não entra na empresa, conversa de A inacessível pelo id para B, oportunidade de A invisível para B) → fluxo do robô (menu + "3" → espera com gatilho OPCAO_3) → CRM → dashboard → **reinício só da aplicação** (sessão e dados preservados, indicadores idênticos) → **reinício da aplicação e do banco** (conversa, cronômetro e oportunidade continuam lá).
 - Banco de demonstração SQLite existente continua migrando/semeando normalmente após mover as migrações de pasta.
 
+### Conexão com a Neon — CONFIRMADA (2026-09-10)
+
+O usuário criou a conta/projeto na Neon e salvou `DATABASE_URL` no `.env` local (nunca visto nem solicitado por mim — só confirmei a presença da variável, sem ler o valor). Testado a partir do computador dele:
+- `npm run db:seed` aplicou `migrations/postgres/0001_baseline.sql` na Neon de verdade e criou os dados de demonstração.
+- `npm run dev` sobe contra a Neon (`/health` → `"db":"postgres"`).
+- Login das 3 contas, isolamento (A não vê B, Hub Action não entra na empresa) e dados do seed conferidos via HTTP — tudo OK.
+- Reiniciar a aplicação preservou sessão e dados (o banco em si é remoto, então isso confirma a reconexão do pool a cada start).
+
 ### Depende de você (nada disso é feito por mim)
 
-1. Criar a conta e o projeto na Neon (passo a passo em PUBLICACAO.md, seção 2) e colocar a connection string em `DATABASE_URL` no seu `.env` — sem me enviar o valor.
-2. Rodar `npm run db:seed` e `npm run dev` para confirmar a aplicação contra a Neon a partir do seu computador (o `/health` mostra `"db":"postgres"`).
-3. Confirmar quando quiser que eu prepare o Render (só demonstração; adormece).
+1. ~~Criar a conta/projeto na Neon e salvar `DATABASE_URL`~~ — feito e confirmado.
+2. Confirmar quando quiser que eu prepare o Render (só demonstração; adormece — não confiável para webhooks reais).
 
 ### Pendências reais
 
-- A conexão com a Neon em si só pode ser confirmada depois do passo 1 acima (SSL/certificado, região, latência do "acordar" do compute).
 - Render não configurado (aguardando confirmação). Número comercial, recebimento/envio reais e robô: pendentes.
 - `embedded-postgres` é dependência de desenvolvimento (~binários do Postgres baixados no `npm install`); não vai para produção.
