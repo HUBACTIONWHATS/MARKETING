@@ -3,6 +3,7 @@
  * login, perfis e isolamento entre empresas. Nunca rodar em produção.
  * Uso: npm run db:seed
  */
+import { addMessage, createConversation, findOrCreateContact } from "./attendance";
 import { hashPassword } from "./auth";
 import { db, runMigrations } from "./db";
 
@@ -40,6 +41,15 @@ function upsertMembership(userId: number, companyId: number, role: "COMPANY_ADMI
   );
 }
 
+/** Cria uma conversa de demonstração (dado de teste) já com pedido de atendente pendente. */
+function seedDemoConversation(companyId: number, contactName: string, phone: string, firstMessage: string): void {
+  const existing = db.prepare("SELECT id FROM contacts WHERE company_id = ? AND phone = ?").get(companyId, phone);
+  if (existing) return; // seed já rodou antes, não duplica
+  const contact = findOrCreateContact(companyId, contactName, phone);
+  const conv = createConversation(companyId, contact.id, "AUTOMATICO");
+  addMessage({ companyId, conversationId: conv.id, authorType: "CLIENTE", body: firstMessage });
+}
+
 function main(): void {
   if (process.env.NODE_ENV === "production") {
     console.error(
@@ -64,6 +74,9 @@ function main(): void {
   upsertMembership(atendenteAId, empresaAId, "AGENT");
   upsertMembership(adminBId, empresaBId, "COMPANY_ADMIN");
   upsertMembership(atendenteBId, empresaBId, "AGENT");
+
+  seedDemoConversation(empresaAId, "Cliente Demo A", "+55 11 90000-1001", "minha internet caiu, quero falar com atendente");
+  seedDemoConversation(empresaBId, "Cliente Demo B", "+55 21 90000-2001", "preciso de suporte, chama um atendente por favor");
 
   console.log("Seed de desenvolvimento aplicado (dados de teste, não usar em produção):");
   console.log(`- admin@hubaction.dev / trocar123 (administrador da plataforma) [id ${platformAdminId}]`);

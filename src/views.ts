@@ -1,3 +1,5 @@
+import type { AuthorType, Conversation, ConversationListItem, ConversationStatus, Message, WaitSummary } from "./attendance";
+import type { BusinessHours, WeekdayKey } from "./businessHours";
 import type { Company, MembershipWithCompany, Role, User } from "./models";
 
 export function escapeHtml(value: string): string {
@@ -124,6 +126,94 @@ const BASE_STYLE = `
     border-radius: 999px;
     padding: 0.15rem 0.6rem;
   }
+  h1, h2, h3 { margin-top: 0; }
+  .toolbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1.25rem; gap: 1rem; flex-wrap: wrap; }
+  .btn {
+    display: inline-block;
+    padding: 0.5rem 0.9rem;
+    border-radius: 6px;
+    border: 1px solid #334155;
+    background: #1e293b;
+    color: #f8fafc;
+    font-size: 0.85rem;
+    font-weight: 600;
+    cursor: pointer;
+    text-decoration: none;
+  }
+  .btn-primary { background: #38bdf8; color: #0f172a; border-color: #38bdf8; }
+  .btn-danger { background: transparent; color: #f87171; border-color: #7f1d1d; }
+  .btn-small { padding: 0.3rem 0.6rem; font-size: 0.75rem; }
+  textarea, select {
+    width: 100%;
+    padding: 0.5rem 0.6rem;
+    border-radius: 6px;
+    border: 1px solid #334155;
+    background: #0b1220;
+    color: #f8fafc;
+    font-size: 0.9rem;
+    font-family: inherit;
+  }
+  .badge {
+    font-size: 0.7rem;
+    font-weight: 600;
+    padding: 0.15rem 0.55rem;
+    border-radius: 999px;
+    border: 1px solid #334155;
+    white-space: nowrap;
+  }
+  .badge-auto { color: #94a3b8; }
+  .badge-aguardando { color: #fbbf24; border-color: #78350f; }
+  .badge-humano { color: #4ade80; border-color: #14532d; }
+  .badge-cliente-aguarda { color: #38bdf8; border-color: #0c4a6e; }
+  .badge-encerrado { color: #64748b; }
+  .conv-list { list-style: none; padding: 0; margin: 0; }
+  .conv-list li a {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.9rem 1rem;
+    border: 1px solid #1f2937;
+    border-radius: 8px;
+    margin-bottom: 0.6rem;
+    text-decoration: none;
+    color: inherit;
+  }
+  .conv-list li a:hover { border-color: #334155; }
+  .conv-list .meta { font-size: 0.75rem; color: #94a3b8; }
+  .panel {
+    border: 1px solid #1f2937;
+    border-radius: 10px;
+    padding: 1.25rem;
+    margin-bottom: 1.25rem;
+    background: #111827;
+  }
+  .panel h3 { font-size: 0.9rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.03em; }
+  .grid-2 { display: grid; grid-template-columns: 2fr 1fr; gap: 1.5rem; align-items: start; }
+  .chat { display: flex; flex-direction: column; gap: 0.6rem; margin-bottom: 1rem; max-height: 420px; overflow-y: auto; }
+  .bubble { max-width: 80%; padding: 0.55rem 0.8rem; border-radius: 10px; font-size: 0.88rem; }
+  .bubble .author { font-size: 0.7rem; opacity: 0.75; margin-bottom: 0.2rem; display: flex; gap: 0.4rem; align-items: center; }
+  .bubble.cliente { align-self: flex-start; background: #1e293b; }
+  .bubble.robo { align-self: flex-end; background: #0c4a6e; }
+  .bubble.humano { align-self: flex-end; background: #14532d; }
+  .bubble.automacao { align-self: flex-end; background: #3730a3; }
+  .bubble.desconhecido { align-self: flex-start; background: #451a03; }
+  .bubble.falhou { border: 1px dashed #f87171; }
+  .fail-tag { color: #f87171; font-size: 0.7rem; }
+  .dev-panel { border: 1px dashed #78350f; background: #1c1206; }
+  .dev-panel h3 { color: #fbbf24; }
+  .field { margin-bottom: 0.9rem; }
+  .field label { font-size: 0.8rem; color: #94a3b8; display: block; margin-bottom: 0.3rem; }
+  .inline-form { display: flex; gap: 0.5rem; }
+  .inline-form textarea { flex: 1; }
+  .hours-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  .hours-table td, .hours-table th { padding: 0.4rem 0.5rem; text-align: left; }
+  .hours-table input[type="time"] {
+    padding: 0.3rem; border-radius: 6px; border: 1px solid #334155; background: #0b1220; color: #f8fafc;
+  }
+  .success { color: #4ade80; font-size: 0.85rem; margin: 0 0 1rem; }
+  .checkbox-line { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; color: #cbd5e1; }
+  .checkbox-line input { width: auto; }
 `;
 
 function page(title: string, body: string): string {
@@ -284,4 +374,252 @@ export function emptyState(title: string, description: string): string {
     <h2>${escapeHtml(title)}</h2>
     <p>${escapeHtml(description)}</p>
   </div>`;
+}
+
+// --- Conversas / atendimento -------------------------------------------------
+
+const STATUS_INFO: Record<ConversationStatus, { label: string; badge: string }> = {
+  AUTO: { label: "Em atendimento automático", badge: "badge-auto" },
+  AGUARDANDO_HUMANO: { label: "Aguardando humano", badge: "badge-aguardando" },
+  HUMANO: { label: "Em atendimento humano", badge: "badge-humano" },
+  AGUARDANDO_CLIENTE: { label: "Aguardando cliente", badge: "badge-cliente-aguarda" },
+  ENCERRADO: { label: "Encerrado", badge: "badge-encerrado" },
+};
+
+const AUTHOR_INFO: Record<AuthorType, { label: string; css: string }> = {
+  CLIENTE: { label: "Cliente", css: "cliente" },
+  ROBO: { label: "Robô", css: "robo" },
+  HUMANO: { label: "Humano", css: "humano" },
+  AUTOMACAO: { label: "Automação", css: "automacao" },
+  DESCONHECIDO: { label: "Desconhecido", css: "desconhecido" },
+};
+
+export function formatDuration(ms: number): string {
+  const totalSeconds = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(totalSeconds / 3600);
+  const m = Math.floor((totalSeconds % 3600) / 60);
+  const s = totalSeconds % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+export function formatMinutes(min: number): string {
+  const h = Math.floor(min / 60);
+  const m = Math.round(min % 60);
+  if (h > 0) return `${h}h ${m}m`;
+  return `${m}m`;
+}
+
+export function inboxPage(opts: { company: Company; user: User; role: Role; items: ConversationListItem[]; isDev: boolean }): string {
+  const rows = opts.items
+    .map((c) => {
+      const info = STATUS_INFO[c.status];
+      const preview = c.last_message_preview ? escapeHtml(c.last_message_preview).slice(0, 90) : "Sem mensagens";
+      return `<li><a href="/empresa/${opts.company.id}/conversas/${c.id}">
+        <div>
+          <div><strong>${escapeHtml(c.contact_name)}</strong> <span class="meta">${escapeHtml(c.contact_phone)}</span></div>
+          <div class="meta">${preview}</div>
+        </div>
+        <span class="badge ${info.badge}">${info.label}</span>
+      </a></li>`;
+    })
+    .join("");
+
+  const newConvForm = opts.isDev
+    ? `<form method="post" action="/empresa/${opts.company.id}/conversas/nova" class="panel dev-panel">
+        <h3>Simulador (dev) — nova conversa de teste</h3>
+        <div class="field"><label>Nome do cliente<input type="text" name="name" required placeholder="Cliente Teste" /></label></div>
+        <div class="field"><label>Telefone<input type="text" name="phone" required placeholder="+55 11 90000-0000" /></label></div>
+        <div class="field">
+          <label>Modo</label>
+          <select name="mode">
+            <option value="AUTOMATICO">Automático (robô responde primeiro)</option>
+            <option value="MANUAL">Manual (sem robô — 1ª mensagem já inicia espera)</option>
+          </select>
+        </div>
+        <button type="submit" class="btn btn-primary">Criar conversa de teste</button>
+      </form>`
+    : "";
+
+  return appShell({
+    company: opts.company,
+    user: opts.user,
+    role: opts.role,
+    active: "conversas",
+    body: `<div class="toolbar"><h2 style="margin:0">Caixa de entrada</h2></div>
+      ${newConvForm}
+      <ul class="conv-list">${rows || "<li style=\"color:#94a3b8\">Nenhuma conversa ainda.</li>"}</ul>`,
+  });
+}
+
+export function conversationDetailPage(opts: {
+  company: Company;
+  user: User;
+  role: Role;
+  conversation: Conversation;
+  contact: { name: string; phone: string };
+  messages: Message[];
+  wait: WaitSummary;
+  isDev: boolean;
+}): string {
+  const { conversation: conv } = opts;
+  const info = STATUS_INFO[conv.status];
+
+  const bubbles = opts.messages
+    .map((m) => {
+      const a = AUTHOR_INFO[m.author_type];
+      const failed = m.send_status === "FALHOU";
+      const time = new Date(m.created_at).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+      return `<div class="bubble ${a.css}${failed ? " falhou" : ""}">
+        <div class="author">${a.label} &middot; ${time}${failed ? ' <span class="fail-tag">falha no envio</span>' : ""}</div>
+        <div>${escapeHtml(m.body)}</div>
+      </div>`;
+    })
+    .join("");
+
+  const waitBox = `<div class="panel">
+    <h3>Espera por atendimento humano</h3>
+    ${
+      opts.wait.isWaiting
+        ? `<p><span class="badge badge-aguardando">Aguardando agora</span></p>
+           <p>Tempo corrido: <strong>${formatDuration(opts.wait.currentElapsedMs ?? 0)}</strong></p>
+           <p>Tempo dentro do expediente: <strong>${formatMinutes(opts.wait.currentBusinessMinutes ?? 0)}</strong></p>`
+        : `<p style="color:#94a3b8">Nenhuma espera em aberto no momento.</p>`
+    }
+    <hr style="border-color:#1f2937" />
+    <p class="meta">Total acumulado (todos os episódios): ${formatDuration(opts.wait.totalElapsedMs)} corridos
+      / ${formatMinutes(opts.wait.totalBusinessMinutes)} de expediente.</p>
+  </div>`;
+
+  const canRespond = conv.status !== "ENCERRADO";
+  const respondForm = canRespond
+    ? `<form method="post" action="/empresa/${opts.company.id}/conversas/${conv.id}/responder" class="panel">
+        <h3>Responder como atendente</h3>
+        <div class="field"><textarea name="body" rows="2" required placeholder="Digite a resposta..."></textarea></div>
+        ${
+          opts.isDev
+            ? `<label class="checkbox-line"><input type="checkbox" name="simular_falha" value="1" /> Simular falha de envio (não encerra a espera)</label>`
+            : ""
+        }
+        <div style="margin-top:0.6rem"><button type="submit" class="btn btn-primary">Enviar resposta</button></div>
+      </form>`
+    : `<p class="meta">Conversa encerrada — não é possível responder.</p>`;
+
+  const assumeForm =
+    conv.status !== "ENCERRADO"
+      ? `<form method="post" action="/empresa/${opts.company.id}/conversas/${conv.id}/assumir" style="display:inline">
+          <button type="submit" class="btn">Assumir atendimento</button>
+        </form>`
+      : "";
+
+  const devPanel = opts.isDev
+    ? `<div class="panel dev-panel">
+        <h3>Simulador (dev — não conecta WhatsApp real)</h3>
+        <form method="post" action="/empresa/${opts.company.id}/conversas/${conv.id}/simular/cliente" class="inline-form" style="margin-bottom:0.6rem">
+          <textarea name="body" rows="1" required placeholder="Mensagem do cliente..."></textarea>
+          <button type="submit" class="btn btn-small">Cliente envia</button>
+        </form>
+        <form method="post" action="/empresa/${opts.company.id}/conversas/${conv.id}/simular/pedir-humano" style="margin-bottom:0.6rem">
+          <button type="submit" class="btn btn-small">Cliente clica em "Falar com atendente"</button>
+        </form>
+        <form method="post" action="/empresa/${opts.company.id}/conversas/${conv.id}/simular/robo">
+          <button type="submit" class="btn btn-small">Robô responde automaticamente</button>
+        </form>
+      </div>`
+    : "";
+
+  return appShell({
+    company: opts.company,
+    user: opts.user,
+    role: opts.role,
+    active: "conversas",
+    body: `<div class="toolbar">
+        <div>
+          <h2 style="margin:0 0 0.25rem">${escapeHtml(opts.contact.name)} <span class="meta">${escapeHtml(opts.contact.phone)}</span></h2>
+          <span class="badge ${info.badge}">${info.label}</span>
+          ${conv.mode === "MANUAL" ? '<span class="badge">modo manual</span>' : ""}
+        </div>
+        <div>${assumeForm}</div>
+      </div>
+      <div class="grid-2">
+        <div>
+          <div class="panel">
+            <div class="chat">${bubbles || '<p style="color:#94a3b8">Sem mensagens ainda.</p>'}</div>
+          </div>
+          ${respondForm}
+          ${devPanel}
+        </div>
+        <div>${waitBox}</div>
+      </div>`,
+  });
+}
+
+// --- Configurações (expediente / fuso) --------------------------------------
+
+const WEEKDAY_LABELS: Record<WeekdayKey, string> = {
+  mon: "Segunda",
+  tue: "Terça",
+  wed: "Quarta",
+  thu: "Quinta",
+  fri: "Sexta",
+  sat: "Sábado",
+  sun: "Domingo",
+};
+
+const WEEKDAY_ORDER: WeekdayKey[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+const COMMON_TIMEZONES = [
+  "America/Sao_Paulo",
+  "America/Manaus",
+  "America/Fortaleza",
+  "America/Noronha",
+  "America/Rio_Branco",
+];
+
+export function settingsPage(opts: {
+  company: Company;
+  user: User;
+  role: Role;
+  canEdit: boolean;
+  hours: BusinessHours;
+  error?: string;
+  success?: string;
+}): string {
+  const tzOptions = COMMON_TIMEZONES.map(
+    (tz) => `<option value="${tz}" ${tz === opts.company.timezone ? "selected" : ""}>${tz}</option>`
+  ).join("");
+
+  const rows = WEEKDAY_ORDER.map((key) => {
+    const w = opts.hours[key];
+    return `<tr>
+      <td>${WEEKDAY_LABELS[key]}</td>
+      <td><label class="checkbox-line"><input type="checkbox" name="${key}_aberto" value="1" ${w ? "checked" : ""} ${opts.canEdit ? "" : "disabled"} /> aberto</label></td>
+      <td><input type="time" name="${key}_inicio" value="${w?.start ?? "09:00"}" ${opts.canEdit ? "" : "disabled"} /></td>
+      <td><input type="time" name="${key}_fim" value="${w?.end ?? "18:00"}" ${opts.canEdit ? "" : "disabled"} /></td>
+    </tr>`;
+  }).join("");
+
+  return appShell({
+    company: opts.company,
+    user: opts.user,
+    role: opts.role,
+    active: "configuracoes",
+    body: `<h2>Configurações</h2>
+      ${opts.error ? `<p class="error">${escapeHtml(opts.error)}</p>` : ""}
+      ${opts.success ? `<p class="success">${escapeHtml(opts.success)}</p>` : ""}
+      <form method="post" action="/empresa/${opts.company.id}/configuracoes" class="panel">
+        <h3>Fuso horário e expediente</h3>
+        <div class="field" style="max-width:320px">
+          <label>Fuso horário da empresa
+            <select name="timezone" ${opts.canEdit ? "" : "disabled"}>${tzOptions}</select>
+          </label>
+        </div>
+        <table class="hours-table">
+          <thead><tr><th>Dia</th><th>Status</th><th>Início</th><th>Fim</th></tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        ${opts.canEdit ? '<div style="margin-top:1rem"><button type="submit" class="btn btn-primary">Salvar</button></div>' : '<p class="meta" style="margin-top:1rem">Apenas o administrador da empresa pode editar.</p>'}
+      </form>`,
+  });
 }

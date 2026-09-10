@@ -6,6 +6,8 @@ export interface Company {
   id: number;
   name: string;
   slug: string;
+  timezone: string;
+  business_hours: string; // JSON — ver src/businessHours.ts
   created_at: string;
 }
 
@@ -65,4 +67,12 @@ export function findMembership(userId: number, companyId: number): Membership | 
   return db
     .prepare("SELECT * FROM memberships WHERE user_id = ? AND company_id = ?")
     .get(userId, companyId) as Membership | undefined;
+}
+
+export function updateCompanySettings(companyId: number, timezone: string, businessHoursJson: string): void {
+  db.prepare("UPDATE companies SET timezone = ?, business_hours = ? WHERE id = ?").run(
+    timezone,
+    businessHoursJson,
+    companyId
+  );
 }
