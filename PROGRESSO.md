@@ -31,7 +31,12 @@ npm run dev
 
 Depois abrir http://localhost:3000 (mostra o nome do projeto) e http://localhost:3000/health (retorna `{"status":"ok"}`).
 
+- Repositório git inicializado e primeiro commit feito (2026-09-10).
+
+## Fluxo de trabalho combinado com o usuário
+
+O usuário envia as etapas uma de cada vez. Ao concluir cada etapa: resumir brevemente o que mudou, como testar, pendências — e pedir a próxima etapa. Não antecipar etapas.
+
 ## Pendências / próxima tarefa
 
-- Repositório git ainda não inicializado (pasta não era um repo git na primeira inspeção) — decidir com o usuário se inicializa agora ou depois.
-- Próxima tarefa fica a critério do próximo comando do usuário (ex.: modelagem inicial do banco/multi-tenant, autenticação e perfis, ou layout do painel). Não iniciar sem instrução.
+- Aguardando a Etapa 2 (próximo comando do usuário). Não iniciar sem instrução.
