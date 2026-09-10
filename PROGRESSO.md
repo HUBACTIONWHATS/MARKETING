@@ -263,10 +263,21 @@ Pesquisa oficial feita, parte independente de credenciais implementada e testada
 
 Ver seção 3 de [CONEXAO_WHATSAPP.md](CONEXAO_WHATSAPP.md) — usa só o número de teste grátis da Meta, sem cartão de crédito.
 
+### Resposta do usuário às perguntas obrigatórias (2026-09-10)
+
+- **Plataforma do robô atual**: já existe um robô com opções de agendamento, cancelamento e "falar com atendente" — o usuário ainda não confirmou o nome da plataforma nem se ela usa a API oficial da Meta. Ele foi explícito: **"Não altere nem desconecte meu atendimento atual. Continue apenas nas partes que não dependem dessa informação."**
+- **Onde os atendentes respondem hoje**: no próprio app do WhatsApp Business (o aplicativo comum, não a Cloud API).
+
+### O que essa resposta muda na prática
+
+- O número real da empresa está hoje no app comum do WhatsApp Business. Migrar esse número para a Cloud API normalmente **desativa o app comum** nesse número (a não ser via "Coexistência", que passa por um parceiro/BSP — não é algo que eu configure sozinho). Ou seja: **nenhuma ação de conectar o número real deve ser feita agora**, mesmo que as credenciais estivessem em mãos — falta identificar a plataforma do robô e decidir o procedimento com o usuário (checklist da seção 4 de CONEXAO_WHATSAPP.md).
+- Não havia mais nada de credencial-independente para avançar na "conexão com o robô" específico dele — o webhook oficial genérico (que não depende de qual robô ele usa) já estava pronto antes da pergunta. Por isso a etapa fica pausada aqui, exatamente como instruído.
+
 ### Pendências / próxima tarefa
 
-- **Bloqueado aguardando resposta do usuário**: qual plataforma ele usa hoje para WhatsApp e onde os atendentes respondem — só depois disso decide-se a arquitetura de conexão com o atendimento/robô real dele.
+- **Bloqueado aguardando o usuário confirmar**: nome da plataforma do robô atual e se ela expõe alguma forma de identificar autoria/transferência (não presumir — só usar o que a documentação dela confirmar).
+- Quando o usuário quiser testar de verdade, o caminho mais seguro é o **número de teste gratuito da Meta** (seção 3 de CONEXAO_WHATSAPP.md) — totalmente separado do número real, zero risco ao atendimento atual.
+- Conectar o número real da empresa só depois do checklist da seção 4 de CONEXAO_WHATSAPP.md, com autorização explícita passo a passo — não fazer isso por iniciativa própria.
 - Envio de mensagens de template (fora da janela de 24h) não implementado — tem custo por envio, decisão do usuário.
 - `statuses` do webhook (entrega/leitura) recebidos mas não usados em nenhuma tela ainda.
 - Cadastro de `phone_number_id` só por linha de comando, sem tela.
-- Não conectar nenhum número real sem passar pelo checklist da seção 4 de CONEXAO_WHATSAPP.md, com autorização explícita do usuário a cada passo.
