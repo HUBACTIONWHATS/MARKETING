@@ -8,13 +8,16 @@ import {
   assumeConversation,
   closeConversation,
   createConversation,
+  detectHumanRequest,
   findOrCreateContact,
   findOrCreateOpenConversation,
   getContact,
   getConversation,
   listConversations,
   listMessages,
+  listWaitEpisodes,
   summarizeWait,
+  updateMessageDeliveryStatus,
   type ConversationMode,
 } from "./attendance";
 import { parseBusinessHours, zonedTimeToUtc, type BusinessHours, type WeekdayKey } from "./businessHours";
@@ -34,6 +37,7 @@ import { computeDashboard } from "./dashboard";
 import { runMigrations } from "./db";
 import {
   findUserByEmail,
+  findUserById,
   listCompanies,
   listCompanyMembers,
   listMembershipsForUser,
@@ -136,19 +140,36 @@ app.post("/webhooks/whatsapp", whatsappJsonParser, async (req, res) => {
   for (const entry of entries) {
     const connection = findConnectionByPhoneNumberId(entry.phoneNumberId);
     if (!connection) {
-      console.warn(`[whatsapp] mensagem recebida para phone_number_id ${entry.phoneNumberId}, sem empresa associada.`);
+      if (entry.messages.length > 0 || entry.statuses.length > 0) {
+        console.warn(`[whatsapp] evento recebido para phone_number_id ${entry.phoneNumberId}, sem empresa associada.`);
+      }
       continue;
     }
     for (const msg of entry.messages) {
       const contact = findOrCreateContact(connection.company_id, msg.contactName ?? msg.fromPhone, msg.fromPhone);
       const conv = findOrCreateOpenConversation(connection.company_id, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
+      // Botão oficial cujo texto bate com pedido de atendente = gatilho B; qualquer outro clique é uma mensagem normal.
+      const platformSignal = msg.isInteractiveReply && detectHumanRequest(msg.body) ? "BOTAO_PLATAFORMA" : undefined;
       addMessage({
         companyId: connection.company_id,
         conversationId: conv.id,
         authorType: "CLIENTE",
         body: msg.body,
         externalId: msg.waMessageId,
+        platformSignal,
       });
+      console.log(
+        `[whatsapp] mensagem ${msg.waMessageId} registrada (empresa ${connection.company_id}, conversa ${conv.id})${platformSignal ? ` [gatilho ${platformSignal}]` : ""}`
+      );
+    }
+    for (const status of entry.statuses) {
+      if (status.status === "delivered") {
+        updateMessageDeliveryStatus(connection.company_id, status.waMessageId, "ENTREGUE");
+      } else if (status.status === "read") {
+        updateMessageDeliveryStatus(connection.company_id, status.waMessageId, "LIDA");
+      } else if (status.status === "failed") {
+        console.warn(`[whatsapp] Meta reportou falha de entrega para ${status.waMessageId} (conversa não é reaberta automaticamente).`);
+      }
     }
   }
   res.status(200).send("EVENT_RECEIVED");
@@ -257,6 +278,7 @@ app.get("/empresa/:companyId/conversas/:conversationId", requireCompanyAccess, (
   }
   const hours = parseBusinessHours(company.business_hours);
   const wait = summarizeWait(conv.id, company.timezone, hours);
+  const assignedUser = conv.assigned_user_id ? findUserById(conv.assigned_user_id) : undefined;
   res.send(
     conversationDetailPage({
       company,
@@ -266,6 +288,8 @@ app.get("/empresa/:companyId/conversas/:conversationId", requireCompanyAccess, (
       contact,
       messages: listMessages(conv.id),
       wait,
+      episodes: listWaitEpisodes(conv.id),
+      assignedUserName: assignedUser?.name ?? null,
       isDev: IS_DEV,
     })
   );
@@ -296,6 +320,7 @@ app.post("/empresa/:companyId/conversas/:conversationId/responder", requireCompa
   }
 
   let sendStatus: "ENVIADA" | "FALHOU";
+  let waMessageId: string | null = null;
   if (conv.channel === "WHATSAPP_OFICIAL") {
     // Canal real: a resposta é de fato enviada pela Cloud API. O checkbox de
     // "simular falha" (dev) não se aplica aqui — a falha, se houver, é real.
@@ -308,12 +333,17 @@ app.post("/empresa/:companyId/conversas/:conversationId/responder", requireCompa
     } else {
       const result = await sendWhatsAppMessage(connection.phone_number_id, contact.phone, body);
       sendStatus = result.ok ? "ENVIADA" : "FALHOU";
+      waMessageId = result.waMessageId ?? null;
       if (!result.ok) console.error(`[whatsapp] falha ao enviar (conversa ${conv.id}): ${result.error}`);
+      else console.log(`[whatsapp] resposta enviada (conversa ${conv.id}, atendente ${res.locals.user.id}, wamid ${waMessageId}).`);
     }
   } else {
     sendStatus = IS_DEV && simular_falha === "1" ? "FALHOU" : "ENVIADA";
   }
 
+  // O atendente autenticado (author_user_id) e o resultado do envio (send_status)
+  // já identificam quem respondeu e se foi aceito pela Meta. waMessageId liga essa
+  // mensagem aos eventos de status (ENTREGUE/LIDA) que chegam depois pelo webhook.
   addMessage({
     companyId: company.id,
     conversationId: conv.id,
@@ -321,6 +351,7 @@ app.post("/empresa/:companyId/conversas/:conversationId/responder", requireCompa
     authorUserId: res.locals.user.id,
     body,
     sendStatus,
+    externalId: waMessageId,
   });
   res.redirect(`/empresa/${company.id}/conversas/${conv.id}`);
 });
@@ -350,9 +381,39 @@ app.post("/empresa/:companyId/conversas/:conversationId/simular/pedir-humano", r
     companyId: res.locals.company.id,
     conversationId: conv.id,
     authorType: "CLIENTE",
-    body: "🔘 Cliente clicou em \"Falar com atendente\"",
-    humanRequestButton: true,
+    body: "🔘 Cliente clicou no botão \"Falar com atendente\"",
+    platformSignal: "BOTAO_PLATAFORMA",
   });
+  res.redirect(`/empresa/${res.locals.company.id}/conversas/${conv.id}`);
+});
+
+// Textos exatos do robô real do usuário — reaproveitados aqui (dev) e como
+// referência de comparação em attendance.ts (looksLikeMenuMessage /
+// looksLikeTransferMessage), que normalizam antes de comparar.
+export const ROBO_MENU_TEXTO =
+  'Olá!\nEu sou sua recepcionista virtual e irei fazer seu atendimento. Por favor digite uma das opções abaixo e para voltar ao menu digite voltar\n1 - Novo agendamento\n2 - Cancelar agendamento\n3 - Falar com atendente.';
+export const ROBO_TRANSFERENCIA_TEXTO =
+  'Por favor aguarde, estou chamando um atendente humano para te ajudar!!\nAtenção: pode demorar alguns minutos.';
+
+app.post("/empresa/:companyId/conversas/:conversationId/simular/robo/menu", requireCompanyAccess, (req, res) => {
+  if (!IS_DEV) {
+    res.status(404).send("Não encontrado.");
+    return;
+  }
+  const conv = loadConversationOrNotFound(req, res);
+  if (!conv) return;
+  addMessage({ companyId: res.locals.company.id, conversationId: conv.id, authorType: "ROBO", body: ROBO_MENU_TEXTO });
+  res.redirect(`/empresa/${res.locals.company.id}/conversas/${conv.id}`);
+});
+
+app.post("/empresa/:companyId/conversas/:conversationId/simular/robo/transferencia", requireCompanyAccess, (req, res) => {
+  if (!IS_DEV) {
+    res.status(404).send("Não encontrado.");
+    return;
+  }
+  const conv = loadConversationOrNotFound(req, res);
+  if (!conv) return;
+  addMessage({ companyId: res.locals.company.id, conversationId: conv.id, authorType: "ROBO", body: ROBO_TRANSFERENCIA_TEXTO });
   res.redirect(`/empresa/${res.locals.company.id}/conversas/${conv.id}`);
 });
 
@@ -363,11 +424,12 @@ app.post("/empresa/:companyId/conversas/:conversationId/simular/robo", requireCo
   }
   const conv = loadConversationOrNotFound(req, res);
   if (!conv) return;
+  const { body } = req.body as { body?: string };
   addMessage({
     companyId: res.locals.company.id,
     conversationId: conv.id,
     authorType: "ROBO",
-    body: "Olá! Sou o assistente automático (dados de teste). Posso ajudar com algo, ou você prefere falar com um atendente?",
+    body: body && body.trim() ? body : "Posso ajudar com algo? (dados de teste)",
   });
   res.redirect(`/empresa/${res.locals.company.id}/conversas/${conv.id}`);
 });

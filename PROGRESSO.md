@@ -279,5 +279,65 @@ Ver seção 3 de [CONEXAO_WHATSAPP.md](CONEXAO_WHATSAPP.md) — usa só o númer
 - Quando o usuário quiser testar de verdade, o caminho mais seguro é o **número de teste gratuito da Meta** (seção 3 de CONEXAO_WHATSAPP.md) — totalmente separado do número real, zero risco ao atendimento atual.
 - Conectar o número real da empresa só depois do checklist da seção 4 de CONEXAO_WHATSAPP.md, com autorização explícita passo a passo — não fazer isso por iniciativa própria.
 - Envio de mensagens de template (fora da janela de 24h) não implementado — tem custo por envio, decisão do usuário.
-- `statuses` do webhook (entrega/leitura) recebidos mas não usados em nenhuma tela ainda.
 - Cadastro de `phone_number_id` só por linha de comando, sem tela.
+- **Diagnóstico em aberto**: a 1ª tentativa de mandar "Quero falar com atendente" pelo celular para o número de teste não chegou ao servidor (nem log, nem banco). Pedi para o usuário confirmar se a mensagem apareceu como "entregue" (2 tracinhos) no celular antes de continuar — ele mudou de assunto para esta etapa antes de responder. Retomar esse diagnóstico quando ele quiser testar o número de teste de novo.
+
+## Etapa concluída: Etapa 7 — Adaptação ao fluxo real do robô (menu 1/2/3 + frase de transferência)
+
+Adaptação do rastreamento de espera já existente (Etapas 3–6) ao fluxo real do robô do usuário. Não foi uma reconstrução do CRM — só a lógica de detecção de gatilho, o schema de `wait_episodes`/`conversations` e o painel da conversa foram estendidos.
+
+### Decisões desta etapa
+
+- **Migração `0006_gatilho_transferencia.sql`**: `conversations.pending_context` (marca "menu ativo aguardando escolha"); `messages.delivery_status` (ENTREGUE/LIDA, distinto de `send_status` que já existia); `wait_episodes` recriada (SQLite não altera `CHECK`) com `trigger_type` (`OPCAO_3` | `BOTAO_PLATAFORMA` | `MENSAGEM_ROBO` | `EVENTO_PLATAFORMA` | `TEXTO_LIVRE` | `MODO_MANUAL`) e `trigger_evidence` (trecho da mensagem que disparou, até 300 caracteres).
+- **"3" só conta com o menu ativo**: `pending_context = 'MENU_PRINCIPAL'` é setado quando o robô manda uma mensagem batendo com as 3 opções do menu (normalizado — tolera acento, maiúscula, pontuação, quebra de linha, espaço invisível). A próxima mensagem do cliente sempre consome esse contexto (seja "3" ou qualquer outra coisa) — é uma janela de uma mensagem só, como pedido.
+- **Frase de transferência do robô**: comparação por normalização "compacta" (tira tudo que não é letra/número, ignora maiúscula/acento) contra a frase fixa, sem o trecho opcional "Atenção: pode demorar...". Só conta se a autoria da mensagem for `ROBO` ou `AUTOMACAO` — um `CLIENTE` mandando o mesmo texto é ignorado como gatilho (não confirma transferência), mesmo que contivesse "atendente" (que normalmente dispara o gatilho de texto livre já existente da Etapa 3) — regra escrita especificamente para não confundir citação com evidência.
+- **Idempotência com correção de ordem**: `startWaitIfNeeded` agora recebe o tipo/evidência do gatilho. Se a espera já está aberta, só ignora — exceto se o novo evento tem horário **anterior** ao que abriu o episódio (entrega fora de ordem), caso em que ele "ganha" e vira o gatilho registrado. Cobre a regra "preserve o primeiro gatilho válido".
+- **Botão de plataforma (gatilho B)**: campo `platformSignal: "BOTAO_PLATAFORMA"` no `addMessage`, setado pelo simulador e pelo webhook do WhatsApp quando o clique é numa resposta interativa (`interactive.button_reply`/`list_reply`) cujo título bate com o detector de pedido de atendente já existente.
+- **Evento de plataforma (gatilho D)**: `platformSignal: "EVENTO_PLATAFORMA"` existe no schema e no `addMessage`, mas **nenhum fornecedor atual está ligado a isso** — é só a extensibilidade pedida, sem inventar endpoint nenhum.
+- **"Diferencie enviada de entregue"**: `messages.delivery_status` é preenchido a partir do campo `statuses` do webhook da Meta (que antes era ignorado), casando pelo `wamid` (`external_id`). Para isso, o envio real (`/responder` em conversa `WHATSAPP_OFICIAL`) agora grava o `wamid` retornado pela Graph API na própria mensagem.
+- **Atendente autenticado**: já existia (`author_user_id`), agora aparece no balão da conversa (nome do atendente) e no painel de espera ("Responsável").
+- **Painel**: nova tabela de episódios por conversa — gatilho, confiabilidade (Confirmado para A/B/C/D e modo manual; Heurística para texto livre), início, horário da 1ª resposta humana (ou "Encerrado sem resposta"), duração. Mantém o resumo agregado (corrido × expediente) que já existia.
+- **Simulador**: botões antigos genéricos trocados por "Robô envia o menu inicial" e "Robô envia aviso de transferência" (textos exatos do robô real do usuário), mais um campo de texto livre para o robô e o botão de "Falar com atendente" (agora marcado como `BOTAO_PLATAFORMA`). Nada de simulado mudou de comportamento — só passou a usar o vocabulário certo.
+
+### Seção 4 do pedido — viabilidade com o robô atual (achados, sem presumir nada)
+
+- **Recebemos mensagens do cliente?** Sim, via o webhook oficial já implementado (Etapa 6) — confirmado funcionando com payload real da Meta.
+- **Recebemos as mensagens enviadas pelo robô?** Só se o robô também enviar pela Cloud API, pelo mesmo número e com o webhook apontando para o Hub Action. O webhook da Meta só entrega no campo `messages` as mensagens que o **cliente** manda; mensagens de saída (do robô ou de humano) não aparecem ali de jeito nenhum — só uma confirmação de entrega/leitura (`statuses`, sem o texto, sem indicar autoria) para quem enviou pela mesma integração.
+- **Recebemos respostas humanas enviadas fora do CRM?** Não, hoje não — o usuário confirmou que os atendentes respondem pelo aplicativo comum do WhatsApp Business, que é um sistema separado da Cloud API (a não ser via "Coexistência", que não está configurada).
+- **Conseguimos distinguir as origens?** Só para o que passa pelo nosso próprio servidor (`/responder` do CRM, autor sempre autenticado — 100% confiável). Para qualquer mensagem de saída que não passe por nós, não há como saber se foi robô ou humano.
+- **Há eventos de menu/transferência da plataforma?** A detecção implementada aqui é por **conteúdo da mensagem** (menu e frase fixa), não por evento estruturado — funciona assim que a mensagem chegar até nós por algum canal. Nenhum fornecedor identificado hoje expõe um evento explícito de transferência.
+
+**Conclusão prática**: no **número de teste** (onde só o Hub Action manda e recebe), a detecção funciona de ponta a ponta — confirmado com o robô simulado e testado via HTTP na aplicação real (não só em teste automatizado). No **atendimento real atual** (robô numa plataforma ainda não identificada + atendentes no app comum do WhatsApp Business), essas regras só vão valer de verdade quando: (a) o robô também enviar pela Cloud API pelo mesmo número monitorado, ou (b) a plataforma do robô tiver uma forma própria (webhook dela) de nos contar o que envia — o que exige saber qual é essa plataforma. Até lá, o código está pronto e testado, mas **não prometo que funcione no atendimento real sem essa confirmação**.
+
+### Testado
+
+- 13 testes novos em [src/robo-transferencia.test.ts](src/robo-transferencia.test.ts), cobrindo exatamente os 11 cenários pedidos na seção 6 + o exemplo de aceitação (qualitativo — os horários do enunciado são ilustrativos, o teste valida a cadeia de eventos e o episódio único). Total do projeto: **38 testes** (`npm test`).
+- Verificado também na aplicação real rodando (não só teste automatizado): robô manda o menu → cliente manda "3" → painel mostra "Aguardando agora" com gatilho "Opção 3 do menu" / "Confirmado"; robô manda só a frase de transferência (sem menu) → inicia com gatilho "Aviso de transferência do robô"; atendente responde → painel mostra "Nenhuma espera em aberto" e a linha da 1ª resposta humana na tabela de episódios.
+- `npx tsc --noEmit` sem erros.
+
+### Como testar
+
+```bash
+npm test                    # 38 testes automatizados
+npm run db:seed             # aplica a migração 0006 no banco de demonstração
+npm run dev
+```
+
+Roteiro curto (via simulador, sem depender do robô real nem do número de teste):
+1. Entre como `admin@empresa-a.dev` (senha `trocar123`) → Conversas → crie uma conversa de teste.
+2. No painel amarelo, clique **"Robô envia o menu inicial"**.
+3. No campo "Cliente envia", digite `3` e envie → o painel da direita deve mostrar **"Aguardando agora"** com gatilho **"Opção 3 do menu"**.
+4. Clique **"Robô envia aviso de transferência"** de novo (repetido) → confira que o horário de início **não muda** (mesma linha na tabela de episódios).
+5. Clique **"Assumir atendimento"** → espera continua aberta.
+6. Responda no formulário "Responder como atendente" → painel mostra **"Nenhuma espera em aberto"**, e a tabela de episódios ganha o horário da 1ª resposta humana e a duração.
+7. Em outra conversa nova, digite no campo "Cliente envia" o texto `3` **sem** clicar antes em "Robô envia o menu inicial" → não deve iniciar espera (confere a regra "não é qualquer 3").
+8. Cole a frase "Por favor aguarde, estou chamando um atendente humano para te ajudar!!" no campo "Cliente envia" → também não deve iniciar (cliente copiando a frase do robô não comprova nada).
+
+Testar com o número de teste da Meta continua disponível (CONEXAO_WHATSAPP.md), mas depende de resolver o diagnóstico em aberto acima primeiro.
+
+### Pendências / próxima tarefa
+
+- Retomar o diagnóstico do número de teste (mensagem real não chegou — ver acima).
+- Plataforma do robô real ainda não identificada pelo usuário — sem isso, a conexão com o atendimento real não avança (ver seção 4 acima).
+- `statuses` de mensagens `FALHOU` reportadas pela Meta (depois de aceitar o envio) só geram log — não reabrem a espera automaticamente; decisão consciente, não implementada por não ter sido pedida.
+- Aguardando a próxima instrução do usuário. Não iniciar nada novo sem comando.

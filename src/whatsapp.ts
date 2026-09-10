@@ -98,26 +98,39 @@ export interface InboundTextMessage {
   body: string;
   /** false para tipos ainda não suportados (imagem, áudio, localização, ...): o corpo vira um aviso, não o conteúdo real. */
   supported: boolean;
+  /** true para clique em botão/lista oficial da plataforma (gatilho B — "se esse evento existir"). */
+  isInteractiveReply: boolean;
+}
+
+export interface DeliveryStatusEvent {
+  waMessageId: string;
+  status: "delivered" | "read" | "sent" | "failed" | string;
+  timestamp: string;
 }
 
 export interface ParsedWebhookEntry {
   phoneNumberId: string;
   messages: InboundTextMessage[];
+  statuses: DeliveryStatusEvent[];
 }
 
-function extractMessageBody(message: any): { body: string; supported: boolean } {
+function extractMessageBody(message: any): { body: string; supported: boolean; isInteractiveReply: boolean } {
   switch (message.type) {
     case "text":
-      return { body: message.text?.body ?? "", supported: true };
+      return { body: message.text?.body ?? "", supported: true, isInteractiveReply: false };
     case "interactive": {
       const title = message.interactive?.button_reply?.title ?? message.interactive?.list_reply?.title;
-      if (title) return { body: title, supported: true };
-      return { body: "[mensagem interativa recebida — formato não reconhecido]", supported: false };
+      if (title) return { body: title, supported: true, isInteractiveReply: true };
+      return { body: "[mensagem interativa recebida — formato não reconhecido]", supported: false, isInteractiveReply: false };
     }
     case "button":
-      return { body: message.button?.text ?? "[botão de template recebido]", supported: true };
+      return { body: message.button?.text ?? "[botão de template recebido]", supported: true, isInteractiveReply: true };
     default:
-      return { body: `[mensagem do tipo "${message.type}" recebida — conteúdo ainda não suportado nesta integração]`, supported: false };
+      return {
+        body: `[mensagem do tipo "${message.type}" recebida — conteúdo ainda não suportado nesta integração]`,
+        supported: false,
+        isInteractiveReply: false,
+      };
   }
 }
 
@@ -140,7 +153,7 @@ export function parseWebhookPayload(body: any): ParsedWebhookEntry[] {
 
       const messages: InboundTextMessage[] = [];
       for (const message of value.messages ?? []) {
-        const { body: text, supported } = extractMessageBody(message);
+        const { body: text, supported, isInteractiveReply } = extractMessageBody(message);
         messages.push({
           waMessageId: message.id,
           fromPhone: message.from,
@@ -148,10 +161,17 @@ export function parseWebhookPayload(body: any): ParsedWebhookEntry[] {
           timestamp: message.timestamp,
           body: text,
           supported,
+          isInteractiveReply,
         });
       }
-      if (messages.length > 0) result.push({ phoneNumberId, messages });
-      // change.value.statuses (confirmação de entrega/leitura de mensagens que NÓS enviamos) fica para uma etapa futura.
+
+      // statuses = confirmação de entrega/leitura das mensagens que NÓS enviamos pela Cloud API.
+      const statuses: DeliveryStatusEvent[] = [];
+      for (const s of value.statuses ?? []) {
+        if (s.id && s.status) statuses.push({ waMessageId: s.id, status: s.status, timestamp: s.timestamp });
+      }
+
+      if (messages.length > 0 || statuses.length > 0) result.push({ phoneNumberId, messages, statuses });
     }
   }
   return result;

@@ -1,4 +1,13 @@
-import type { AuthorType, Conversation, ConversationListItem, ConversationStatus, Message, WaitSummary } from "./attendance";
+import type {
+  AuthorType,
+  Conversation,
+  ConversationListItem,
+  ConversationStatus,
+  MessageWithAuthor,
+  WaitEpisode,
+  WaitSummary,
+  WaitTriggerType,
+} from "./attendance";
 import type { BusinessHours, WeekdayKey } from "./businessHours";
 import type { OpportunityWithDetails, PipelineStage } from "./crm";
 import type { DashboardData, DashboardFilters } from "./dashboard";
@@ -459,6 +468,16 @@ const AUTHOR_INFO: Record<AuthorType, { label: string; css: string }> = {
   DESCONHECIDO: { label: "Desconhecido", css: "desconhecido" },
 };
 
+/** Gatilho que iniciou o episódio de espera — "origem" pedida no painel. Confiabilidade acompanha: gatilhos com evidência explícita são "confirmado"; a heurística de texto livre é "heurística". */
+const TRIGGER_INFO: Record<WaitTriggerType, { label: string; confidence: "Confirmado" | "Heurística" }> = {
+  OPCAO_3: { label: "Opção 3 do menu", confidence: "Confirmado" },
+  BOTAO_PLATAFORMA: { label: "Botão da plataforma", confidence: "Confirmado" },
+  MENSAGEM_ROBO: { label: "Aviso de transferência do robô", confidence: "Confirmado" },
+  EVENTO_PLATAFORMA: { label: "Evento da plataforma", confidence: "Confirmado" },
+  TEXTO_LIVRE: { label: "Texto livre do cliente", confidence: "Heurística" },
+  MODO_MANUAL: { label: "Modo manual (sem robô)", confidence: "Confirmado" },
+};
+
 export function formatDuration(ms: number): string {
   const totalSeconds = Math.max(0, Math.round(ms / 1000));
   const h = Math.floor(totalSeconds / 3600);
@@ -527,8 +546,10 @@ export function conversationDetailPage(opts: {
   role: Role;
   conversation: Conversation;
   contact: { name: string; phone: string };
-  messages: Message[];
+  messages: MessageWithAuthor[];
   wait: WaitSummary;
+  episodes: WaitEpisode[];
+  assignedUserName: string | null;
   isDev: boolean;
 }): string {
   const { conversation: conv } = opts;
@@ -539,10 +560,32 @@ export function conversationDetailPage(opts: {
       const a = AUTHOR_INFO[m.author_type];
       const failed = m.send_status === "FALHOU";
       const time = new Date(m.created_at).toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+      const who = m.author_type === "HUMANO" && m.author_name ? `${a.label} (${escapeHtml(m.author_name)})` : a.label;
+      const delivery =
+        m.delivery_status === "LIDA" ? " · lida" : m.delivery_status === "ENTREGUE" ? " · entregue" : "";
       return `<div class="bubble ${a.css}${failed ? " falhou" : ""}">
-        <div class="author">${a.label} &middot; ${time}${failed ? ' <span class="fail-tag">falha no envio</span>' : ""}</div>
+        <div class="author">${who} &middot; ${time}${delivery}${failed ? ' <span class="fail-tag">falha no envio</span>' : ""}</div>
         <div>${escapeHtml(m.body)}</div>
       </div>`;
+    })
+    .join("");
+
+  const clockTime = (iso: string) => new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+
+  const episodeRows = opts.episodes
+    .slice()
+    .reverse()
+    .map((ep) => {
+      const trigger = ep.trigger_type ? TRIGGER_INFO[ep.trigger_type] : null;
+      const isOpen = !ep.ended_at;
+      const duration = isOpen ? formatDuration(Date.now() - new Date(ep.started_at).getTime()) : formatDuration(new Date(ep.ended_at!).getTime() - new Date(ep.started_at).getTime());
+      return `<tr>
+        <td>${trigger ? escapeHtml(trigger.label) : "—"}</td>
+        <td><span class="badge ${trigger?.confidence === "Confirmado" ? "badge-humano" : "badge-aguardando"}">${trigger?.confidence ?? "—"}</span></td>
+        <td>${clockTime(ep.started_at)}</td>
+        <td>${isOpen ? "Em aberto" : ep.ended_reason === "RESPOSTA_HUMANA" ? clockTime(ep.ended_at!) : "Encerrado sem resposta"}</td>
+        <td>${duration}</td>
+      </tr>`;
     })
     .join("");
 
@@ -555,9 +598,20 @@ export function conversationDetailPage(opts: {
            <p>Tempo dentro do expediente: <strong>${formatMinutes(opts.wait.currentBusinessMinutes ?? 0)}</strong></p>`
         : `<p style="color:#94a3b8">Nenhuma espera em aberto no momento.</p>`
     }
+    <p class="meta">Responsável: ${opts.assignedUserName ? escapeHtml(opts.assignedUserName) : "ainda não atribuído"}</p>
     <hr style="border-color:#1f2937" />
     <p class="meta">Total acumulado (todos os episódios): ${formatDuration(opts.wait.totalElapsedMs)} corridos
       / ${formatMinutes(opts.wait.totalBusinessMinutes)} de expediente.</p>
+    ${
+      episodeRows
+        ? `<div style="overflow-x:auto;margin-top:0.75rem">
+            <table class="hours-table">
+              <thead><tr><th>Gatilho</th><th>Confiabilidade</th><th>Início</th><th>1ª resposta humana</th><th>Duração</th></tr></thead>
+              <tbody>${episodeRows}</tbody>
+            </table>
+          </div>`
+        : ""
+    }
   </div>`;
 
   const canRespond = conv.status !== "ENCERRADO";
@@ -587,15 +641,23 @@ export function conversationDetailPage(opts: {
   const devPanel = opts.isDev
     ? `<div class="panel dev-panel">
         <h3>Simulador (dev — não conecta WhatsApp real)</h3>
-        <form method="post" action="/empresa/${opts.company.id}/conversas/${conv.id}/simular/cliente" class="inline-form" style="margin-bottom:0.6rem">
-          <textarea name="body" rows="1" required placeholder="Mensagem do cliente..."></textarea>
+        <p class="meta" style="margin-top:-0.4rem">Reproduz o fluxo real do robô do usuário: menu numerado, opção "3" e frase fixa de transferência.</p>
+        <form method="post" action="/empresa/${opts.company.id}/conversas/${conv.id}/simular/robo/menu" style="margin-bottom:0.5rem">
+          <button type="submit" class="btn btn-small">Robô envia o menu inicial</button>
+        </form>
+        <form method="post" action="/empresa/${opts.company.id}/conversas/${conv.id}/simular/robo/transferencia" style="margin-bottom:0.5rem">
+          <button type="submit" class="btn btn-small">Robô envia aviso de transferência</button>
+        </form>
+        <form method="post" action="/empresa/${opts.company.id}/conversas/${conv.id}/simular/cliente" class="inline-form" style="margin-bottom:0.5rem">
+          <textarea name="body" rows="1" required placeholder='Mensagem do cliente (ex.: "3")'></textarea>
           <button type="submit" class="btn btn-small">Cliente envia</button>
         </form>
-        <form method="post" action="/empresa/${opts.company.id}/conversas/${conv.id}/simular/pedir-humano" style="margin-bottom:0.6rem">
-          <button type="submit" class="btn btn-small">Cliente clica em "Falar com atendente"</button>
+        <form method="post" action="/empresa/${opts.company.id}/conversas/${conv.id}/simular/pedir-humano" style="margin-bottom:0.5rem">
+          <button type="submit" class="btn btn-small">Cliente clica no botão "Falar com atendente"</button>
         </form>
-        <form method="post" action="/empresa/${opts.company.id}/conversas/${conv.id}/simular/robo">
-          <button type="submit" class="btn btn-small">Robô responde automaticamente</button>
+        <form method="post" action="/empresa/${opts.company.id}/conversas/${conv.id}/simular/robo" class="inline-form">
+          <textarea name="body" rows="1" placeholder="Outra mensagem do robô (texto livre, opcional)"></textarea>
+          <button type="submit" class="btn btn-small">Robô envia</button>
         </form>
       </div>`
     : "";
