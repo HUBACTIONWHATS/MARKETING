@@ -3,6 +3,7 @@
  * login, perfis e isolamento entre empresas. Nunca rodar em produção.
  * Uso: npm run db:seed
  */
+import "./env";
 import { addMessage, createConversation, findOrCreateContact } from "./attendance";
 import { hashPassword } from "./auth";
 import { createOpportunity, ensureDefaultPipelineStages } from "./crm";

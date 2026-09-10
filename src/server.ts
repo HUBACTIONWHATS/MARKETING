@@ -1,3 +1,4 @@
+import "./env"; // precisa vir antes de tudo: carrega .env em process.env
 import express from "express";
 import session from "express-session";
 import path from "path";
@@ -8,6 +9,7 @@ import {
   closeConversation,
   createConversation,
   findOrCreateContact,
+  findOrCreateOpenConversation,
   getContact,
   getConversation,
   listConversations,
@@ -38,6 +40,14 @@ import {
   updateCompanySettings,
   updateSlaTarget,
 } from "./models";
+import {
+  findConnectionByPhoneNumberId,
+  getWhatsappCredentials,
+  listConnectionsForCompany,
+  parseWebhookPayload,
+  sendWhatsAppMessage,
+  verifyWebhookSignature,
+} from "./whatsapp";
 import {
   adminPage,
   appShell,
@@ -73,6 +83,75 @@ app.use(
 
 app.get("/health", (_req, res) => {
   res.json({ status: "ok" });
+});
+
+// --- Webhook oficial do WhatsApp (Meta Cloud API) ---------------------------
+// Sem credenciais configuradas, o handshake e a validação de assinatura
+// recusam de forma explícita — nunca processa nada não verificado.
+
+app.get("/webhooks/whatsapp", (req, res) => {
+  const { verifyToken } = getWhatsappCredentials();
+  const mode = req.query["hub.mode"];
+  const token = req.query["hub.verify_token"];
+  const challenge = req.query["hub.challenge"];
+  if (!verifyToken) {
+    res.status(503).send("WHATSAPP_VERIFY_TOKEN não configurado neste servidor.");
+    return;
+  }
+  if (mode === "subscribe" && token === verifyToken) {
+    res.status(200).send(String(challenge ?? ""));
+    return;
+  }
+  res.status(403).send("Verificação do webhook falhou.");
+});
+
+// express.json com `verify` guarda o corpo bruto em req.rawBody — necessário
+// para checar a assinatura HMAC antes de confiar no JSON já decodificado.
+const whatsappJsonParser = express.json({
+  verify: (req, _res, buf) => {
+    (req as express.Request & { rawBody?: Buffer }).rawBody = buf;
+  },
+});
+
+app.post("/webhooks/whatsapp", whatsappJsonParser, async (req, res) => {
+  const { appSecret } = getWhatsappCredentials();
+  const rawBody = (req as express.Request & { rawBody?: Buffer }).rawBody;
+  if (!appSecret) {
+    console.error("[whatsapp] webhook recebido mas WHATSAPP_APP_SECRET não configurado — recusando processar.");
+    res.status(503).send("Integração não configurada.");
+    return;
+  }
+  const signature = req.header("X-Hub-Signature-256");
+  if (!rawBody || !verifyWebhookSignature(rawBody, signature, appSecret)) {
+    console.error("[whatsapp] assinatura inválida no webhook — requisição rejeitada.");
+    res.status(403).send("Assinatura inválida.");
+    return;
+  }
+
+  // Responde 200 mesmo quando não há o que fazer (ex.: número não mapeado a
+  // nenhuma empresa) — a Meta reentrega por até 7 dias em caso de erro, e
+  // reentregar não resolveria um mapeamento ausente. Falhas de banco, essas
+  // sim, deixam o handler estourar para virar 500 e pedir nova tentativa.
+  const entries = parseWebhookPayload(req.body);
+  for (const entry of entries) {
+    const connection = findConnectionByPhoneNumberId(entry.phoneNumberId);
+    if (!connection) {
+      console.warn(`[whatsapp] mensagem recebida para phone_number_id ${entry.phoneNumberId}, sem empresa associada.`);
+      continue;
+    }
+    for (const msg of entry.messages) {
+      const contact = findOrCreateContact(connection.company_id, msg.contactName ?? msg.fromPhone, msg.fromPhone);
+      const conv = findOrCreateOpenConversation(connection.company_id, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
+      addMessage({
+        companyId: connection.company_id,
+        conversationId: conv.id,
+        authorType: "CLIENTE",
+        body: msg.body,
+        externalId: msg.waMessageId,
+      });
+    }
+  }
+  res.status(200).send("EVENT_RECEIVED");
 });
 
 app.get("/login", (req, res) => {
@@ -206,24 +285,44 @@ app.post("/empresa/:companyId/conversas/:conversationId/encerrar", requireCompan
   res.redirect(`/empresa/${res.locals.company.id}/conversas/${conv.id}`);
 });
 
-app.post("/empresa/:companyId/conversas/:conversationId/responder", requireCompanyAccess, (req, res) => {
+app.post("/empresa/:companyId/conversas/:conversationId/responder", requireCompanyAccess, async (req, res) => {
   const conv = loadConversationOrNotFound(req, res);
   if (!conv) return;
+  const company = res.locals.company;
   const { body, simular_falha } = req.body as { body?: string; simular_falha?: string };
   if (!body || !body.trim()) {
-    res.redirect(`/empresa/${res.locals.company.id}/conversas/${conv.id}`);
+    res.redirect(`/empresa/${company.id}/conversas/${conv.id}`);
     return;
   }
-  const willFail = IS_DEV && simular_falha === "1";
+
+  let sendStatus: "ENVIADA" | "FALHOU";
+  if (conv.channel === "WHATSAPP_OFICIAL") {
+    // Canal real: a resposta é de fato enviada pela Cloud API. O checkbox de
+    // "simular falha" (dev) não se aplica aqui — a falha, se houver, é real.
+    const connections = listConnectionsForCompany(company.id);
+    const connection = connections.find((c) => c.active);
+    const contact = getContact(company.id, conv.contact_id);
+    if (!connection || !contact) {
+      sendStatus = "FALHOU";
+      console.error(`[whatsapp] envio recusado: conexão ou contato ausente (empresa ${company.id}, conversa ${conv.id})`);
+    } else {
+      const result = await sendWhatsAppMessage(connection.phone_number_id, contact.phone, body);
+      sendStatus = result.ok ? "ENVIADA" : "FALHOU";
+      if (!result.ok) console.error(`[whatsapp] falha ao enviar (conversa ${conv.id}): ${result.error}`);
+    }
+  } else {
+    sendStatus = IS_DEV && simular_falha === "1" ? "FALHOU" : "ENVIADA";
+  }
+
   addMessage({
-    companyId: res.locals.company.id,
+    companyId: company.id,
     conversationId: conv.id,
     authorType: "HUMANO",
     authorUserId: res.locals.user.id,
     body,
-    sendStatus: willFail ? "FALHOU" : "ENVIADA",
+    sendStatus,
   });
-  res.redirect(`/empresa/${res.locals.company.id}/conversas/${conv.id}`);
+  res.redirect(`/empresa/${company.id}/conversas/${conv.id}`);
 });
 
 app.post("/empresa/:companyId/conversas/:conversationId/simular/cliente", requireCompanyAccess, (req, res) => {

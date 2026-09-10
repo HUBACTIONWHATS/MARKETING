@@ -36,6 +36,7 @@ export interface Message {
   body: string;
   send_status: SendStatus;
   created_at: string;
+  external_id: string | null;
 }
 
 export interface WaitEpisode {
@@ -90,14 +91,19 @@ export function findOrCreateContact(companyId: number, name: string, phone: stri
   return db.prepare("SELECT * FROM contacts WHERE id = ?").get(info.lastInsertRowid) as Contact;
 }
 
-export function createConversation(companyId: number, contactId: number, mode: ConversationMode): Conversation {
+export function createConversation(
+  companyId: number,
+  contactId: number,
+  mode: ConversationMode,
+  channel: string = "SIMULADO"
+): Conversation {
   const at = nowIso();
   const info = db
     .prepare(
       `INSERT INTO conversations (company_id, contact_id, channel, mode, status, created_at, updated_at)
-       VALUES (?, ?, 'SIMULADO', ?, 'AUTO', ?, ?)`
+       VALUES (?, ?, ?, ?, 'AUTO', ?, ?)`
     )
-    .run(companyId, contactId, mode, at, at);
+    .run(companyId, contactId, channel, mode, at, at);
   return getConversation(companyId, Number(info.lastInsertRowid))!;
 }
 
@@ -105,6 +111,26 @@ export function getContact(companyId: number, contactId: number): Contact | unde
   return db.prepare("SELECT * FROM contacts WHERE id = ? AND company_id = ?").get(contactId, companyId) as
     | Contact
     | undefined;
+}
+
+/** Última conversa ainda não encerrada desse contato (qualquer canal) — evita criar uma conversa nova a cada mensagem recebida. */
+export function findOpenConversationForContact(companyId: number, contactId: number): Conversation | undefined {
+  return db
+    .prepare(
+      `SELECT * FROM conversations
+       WHERE company_id = ? AND contact_id = ? AND status != 'ENCERRADO'
+       ORDER BY updated_at DESC LIMIT 1`
+    )
+    .get(companyId, contactId) as Conversation | undefined;
+}
+
+export function findOrCreateOpenConversation(
+  companyId: number,
+  contactId: number,
+  mode: ConversationMode,
+  channel: string
+): Conversation {
+  return findOpenConversationForContact(companyId, contactId) ?? createConversation(companyId, contactId, mode, channel);
 }
 
 export function getConversation(companyId: number, conversationId: number): Conversation | undefined {
@@ -262,6 +288,14 @@ export interface AddMessageInput {
   sendStatus?: SendStatus;
   /** true quando a mensagem representa o cliente clicando em "Falar com atendente". */
   humanRequestButton?: boolean;
+  /**
+   * Id da mensagem na origem externa (ex.: wamid do WhatsApp Cloud API).
+   * Garante idempotência: webhooks podem reentregar o mesmo evento (a Meta
+   * tenta de novo por até 7 dias em caso de falha) — com o mesmo external_id,
+   * a mensagem já registrada é devolvida sem repetir nenhum efeito colateral
+   * (não conta duas vezes, não reabre espera encerrada, etc).
+   */
+  externalId?: string | null;
 }
 
 /**
@@ -272,20 +306,37 @@ export interface AddMessageInput {
  * - Envio com falha não encerra nada.
  * - Pedido repetido não reinicia (garantido por startWaitIfNeeded).
  * - Modo manual: qualquer mensagem do cliente inicia/mantém a espera (sem robô).
+ * - Com externalId repetido, é idempotente (ver AddMessageInput.externalId).
  */
 export function addMessage(input: AddMessageInput): Message {
   const convo = getConversation(input.companyId, input.conversationId);
   if (!convo) throw new Error("Conversa não encontrada.");
+
+  if (input.externalId) {
+    const existing = db
+      .prepare("SELECT * FROM messages WHERE company_id = ? AND external_id = ?")
+      .get(input.companyId, input.externalId) as Message | undefined;
+    if (existing) return existing;
+  }
 
   const at = nowIso();
   const sendStatus: SendStatus = input.sendStatus ?? "ENVIADA";
 
   const info = db
     .prepare(
-      `INSERT INTO messages (company_id, conversation_id, author_type, author_user_id, body, send_status, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO messages (company_id, conversation_id, author_type, author_user_id, body, send_status, created_at, external_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
     )
-    .run(input.companyId, input.conversationId, input.authorType, input.authorUserId ?? null, input.body, sendStatus, at);
+    .run(
+      input.companyId,
+      input.conversationId,
+      input.authorType,
+      input.authorUserId ?? null,
+      input.body,
+      sendStatus,
+      at,
+      input.externalId ?? null
+    );
 
   if (input.authorType === "HUMANO") {
     if (sendStatus === "ENVIADA") {

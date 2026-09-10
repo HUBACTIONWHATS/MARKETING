@@ -230,6 +230,43 @@ Sem ampliação de escopo. Revisão feita com banco zerado, roteiro de ponta a p
 
 Ver [ROTEIRO_TESTE.md](ROTEIRO_TESTE.md) (iniciar: `npm run dev`; encerrar: Ctrl + C).
 
+## Etapa concluída (parcial): Etapa 6 — Integração oficial do WhatsApp (Cloud API)
+
+Pesquisa oficial feita, parte independente de credenciais implementada e testada. **Pausado antes de conectar ao robô/atendimento atual do usuário**, aguardando resposta sobre qual plataforma ele usa hoje e onde os atendentes respondem (pergunta obrigatória feita na conversa, ver [CONEXAO_WHATSAPP.md](CONEXAO_WHATSAPP.md) seção 5).
+
+### Pesquisa (fontes e resumo completo em [CONEXAO_WHATSAPP.md](CONEXAO_WHATSAPP.md))
+
+- Uso da Cloud API é gratuito; cobrança é por mensagem de **template** enviada fora da janela de 24h (desde jul/2025, por mensagem — não mais "por conversa"); respostas dentro da janela de 24h são grátis. Preço varia por país/categoria e muda com o tempo — não fixar número no código nem prometer valor.
+- Número de teste grátis, sem cartão, até 5 destinatários autorizados. Produção exige Business Verification (documentos, 2–10 dias úteis) e, para mensagens de template, cartão de crédito cadastrado na conta comercial — decisão que fica com o usuário, não foi e não será feita por mim.
+- Webhook: handshake `GET` (`hub.mode`/`hub.verify_token`/`hub.challenge`), eventos por `POST` assinado (`X-Hub-Signature-256` = HMAC-SHA256 do corpo com o App Secret), reentrega por até 7 dias se não responder 200, limite de 3 MB.
+- **Achado crítico**: a Cloud API não tem nenhum conceito nativo de "mensagem enviada por robô" vs "por humano", nem evento de "transferência" — isso só é confiável se o Hub Action for o único sistema que envia as respostas (bot e humano) pelo nosso servidor. Se o atendimento continuar saindo por outro canal (app comum, outra plataforma), não dá pra garantir essa métrica — por isso a pergunta ao usuário é bloqueante antes de qualquer "conexão com o robô" dele.
+- Existe "Coexistência" (2025+): manter o app comum do WhatsApp Business funcionando junto com a Cloud API no mesmo número — geralmente via um parceiro/BSP, não direto com a Meta.
+
+### O que foi implementado (credencial-independente para construir; testado com credenciais fictícias)
+
+- `migrations/0005_whatsapp.sql`: tabela `whatsapp_connections` (mapeia `phone_number_id` → empresa) e `messages.external_id` (deduplicação, índice único parcial).
+- [src/whatsapp.ts](src/whatsapp.ts): validação de assinatura (HMAC-SHA256 + comparação em tempo constante), leitura do payload oficial documentado (texto, botão/lista interativos, tipos não suportados viram aviso em vez de se perder), envio via Graph API (recusa com erro claro sem `WHATSAPP_ACCESS_TOKEN`).
+- [src/server.ts](src/server.ts): rotas `GET`/`POST /webhooks/whatsapp` (recusa sem `WHATSAPP_APP_SECRET`/`WHATSAPP_VERIFY_TOKEN` configurados, valida assinatura antes de tudo, sempre reaproveita `addMessage` — mesma detecção de pedido de humano, mesmo cronômetro, zero lógica duplicada). Rota `/conversas/:id/responder` agora envia de verdade quando o canal da conversa é `WHATSAPP_OFICIAL` (o checkbox de simular falha só vale para `SIMULADO`).
+- `src/attendance.ts`: `createConversation`/`addMessage` ganharam `channel`/`externalId`; novo `findOrCreateOpenConversation` (reaproveita conversa aberta do mesmo contato em vez de criar uma por mensagem).
+- `src/conectar-whatsapp.ts`: script para associar um `phone_number_id` a uma empresa (linha de comando — ainda não tem tela).
+- `src/env.ts`: carrega `.env` (API nativa do Node, `process.loadEnvFile`, sem dependência nova); `.env.example` documentado; `.env` já estava no `.gitignore`.
+- Testes novos: [src/whatsapp.test.ts](src/whatsapp.test.ts) (assinatura, parsing do payload oficial, deduplicação por `external_id`, reaproveitamento de conversa aberta, recusa de envio sem credencial). Total do projeto: **25 testes** (`npm test`).
+
+### Verificado
+
+- `npm test`: 25/25.
+- Ponta a ponta com servidor real rodando e credenciais fictícias: handshake do webhook (token certo → 200 com o challenge; errado → 403); `POST` sem assinatura → 403; assinatura errada → 403; payload assinado corretamente → 200, mensagem aparece na Caixa de Entrada certa (isolada por empresa), e o pedido de atendente no texto já disparou a espera pelo motor existente; reentrega do mesmo evento (`wamid` repetido) → 200 sem duplicar (checado direto no banco: 1 linha só); número não cadastrado em nenhuma empresa → 200 com aviso no log, nada quebra.
+- `.env` carregado automaticamente pelo `npm run dev`/`db:seed` sem quebrar quando o arquivo não existe (comportamento padrão, sem WhatsApp configurado).
+- Simulador continua isolado: rotas `/simular/*` e o checkbox de falha simulada não foram tocados; só passam a coexistir com o canal `WHATSAPP_OFICIAL`.
+
+### Como testar (sem número real)
+
+Ver seção 3 de [CONEXAO_WHATSAPP.md](CONEXAO_WHATSAPP.md) — usa só o número de teste grátis da Meta, sem cartão de crédito.
+
 ### Pendências / próxima tarefa
 
-- Aguardando a Etapa 6 (próximo comando do usuário). Não iniciar sem instrução.
+- **Bloqueado aguardando resposta do usuário**: qual plataforma ele usa hoje para WhatsApp e onde os atendentes respondem — só depois disso decide-se a arquitetura de conexão com o atendimento/robô real dele.
+- Envio de mensagens de template (fora da janela de 24h) não implementado — tem custo por envio, decisão do usuário.
+- `statuses` do webhook (entrega/leitura) recebidos mas não usados em nenhuma tela ainda.
+- Cadastro de `phone_number_id` só por linha de comando, sem tela.
+- Não conectar nenhum número real sem passar pelo checklist da seção 4 de CONEXAO_WHATSAPP.md, com autorização explícita do usuário a cada passo.
