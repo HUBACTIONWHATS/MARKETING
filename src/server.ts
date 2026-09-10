@@ -5,6 +5,7 @@ import { requireAuth, requireCompanyAccess, requirePlatformAdmin, verifyPassword
 import {
   addMessage,
   assumeConversation,
+  closeConversation,
   createConversation,
   findOrCreateContact,
   getContact,
@@ -15,13 +16,36 @@ import {
   type ConversationMode,
 } from "./attendance";
 import { parseBusinessHours, type BusinessHours, type WeekdayKey } from "./businessHours";
+import {
+  addStage,
+  createOpportunity,
+  deleteStage,
+  ensureDefaultPipelineStages,
+  listOpportunitiesByStage,
+  listStages,
+  moveOpportunity,
+  renameStage,
+  reorderStage,
+  updateOpportunityDetails,
+} from "./crm";
+import { computeDashboard } from "./dashboard";
 import { runMigrations } from "./db";
-import { findUserByEmail, listCompanies, listMembershipsForUser, updateCompanySettings } from "./models";
+import {
+  findUserByEmail,
+  listCompanies,
+  listCompanyMembers,
+  listMembershipsForUser,
+  updateCompanySettings,
+  updateSlaTarget,
+} from "./models";
 import {
   adminPage,
   appShell,
   companySelectorPage,
   conversationDetailPage,
+  crmPage,
+  crmStagesPage,
+  dashboardPage,
   emptyState,
   inboxPage,
   loginPage,
@@ -174,6 +198,13 @@ app.post("/empresa/:companyId/conversas/:conversationId/assumir", requireCompany
   res.redirect(`/empresa/${res.locals.company.id}/conversas/${conv.id}`);
 });
 
+app.post("/empresa/:companyId/conversas/:conversationId/encerrar", requireCompanyAccess, (req, res) => {
+  const conv = loadConversationOrNotFound(req, res);
+  if (!conv) return;
+  closeConversation(res.locals.company.id, conv.id);
+  res.redirect(`/empresa/${res.locals.company.id}/conversas/${conv.id}`);
+});
+
 app.post("/empresa/:companyId/conversas/:conversationId/responder", requireCompanyAccess, (req, res) => {
   const conv = loadConversationOrNotFound(req, res);
   if (!conv) return;
@@ -304,18 +335,173 @@ app.post("/empresa/:companyId/configuracoes", requireCompanyAccess, (req, res) =
   );
 });
 
+// --- CRM: funil configurável, separado de contato --------------------------
+
+app.get("/empresa/:companyId/crm", requireCompanyAccess, (_req, res) => {
+  const company = res.locals.company;
+  ensureDefaultPipelineStages(company.id);
+  res.send(
+    crmPage({
+      company,
+      user: res.locals.user,
+      role: res.locals.membership.role,
+      stages: listStages(company.id),
+      byStage: listOpportunitiesByStage(company.id),
+      members: listCompanyMembers(company.id),
+    })
+  );
+});
+
+function parseReais(value: string | undefined): number {
+  const n = Number((value || "0").replace(",", "."));
+  return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) : 0;
+}
+
+app.post("/empresa/:companyId/crm/oportunidades", requireCompanyAccess, (req, res) => {
+  const company = res.locals.company;
+  const body = req.body as Record<string, string | undefined>;
+  if (!body.contact_name || !body.contact_phone || !body.title) {
+    res.status(400).send("Contato e título são obrigatórios.");
+    return;
+  }
+  const contact = findOrCreateContact(company.id, body.contact_name, body.contact_phone);
+  createOpportunity({
+    companyId: company.id,
+    contactId: contact.id,
+    title: body.title,
+    valueCents: parseReais(body.value),
+    responsibleUserId: body.responsible_user_id ? Number(body.responsible_user_id) : null,
+    scheduledAt: body.scheduled_at ? new Date(body.scheduled_at).toISOString() : null,
+  });
+  res.redirect(`/empresa/${company.id}/crm`);
+});
+
+app.post("/empresa/:companyId/crm/oportunidades/:opportunityId/mover", requireCompanyAccess, (req, res) => {
+  const company = res.locals.company;
+  const body = req.body as Record<string, string | undefined>;
+  const result = moveOpportunity(company.id, Number(req.params.opportunityId), Number(body.stage_id), body.lost_reason);
+  if (!result.ok) {
+    res.status(400).send(
+      crmPage({
+        company,
+        user: res.locals.user,
+        role: res.locals.membership.role,
+        stages: listStages(company.id),
+        byStage: listOpportunitiesByStage(company.id),
+        members: listCompanyMembers(company.id),
+        error: result.error,
+      })
+    );
+    return;
+  }
+  res.redirect(`/empresa/${company.id}/crm`);
+});
+
+app.post("/empresa/:companyId/crm/oportunidades/:opportunityId/editar", requireCompanyAccess, (req, res) => {
+  const company = res.locals.company;
+  const body = req.body as Record<string, string | undefined>;
+  updateOpportunityDetails(company.id, Number(req.params.opportunityId), {
+    responsibleUserId: body.responsible_user_id ? Number(body.responsible_user_id) : null,
+    valueCents: parseReais(body.value),
+    scheduledAt: body.scheduled_at ? new Date(body.scheduled_at).toISOString() : null,
+  });
+  res.redirect(`/empresa/${company.id}/crm`);
+});
+
+app.get("/empresa/:companyId/crm/etapas", requireCompanyAccess, (_req, res) => {
+  const company = res.locals.company;
+  ensureDefaultPipelineStages(company.id);
+  res.send(crmStagesPage({ company, user: res.locals.user, role: res.locals.membership.role, stages: listStages(company.id) }));
+});
+
+app.post("/empresa/:companyId/crm/etapas", requireCompanyAccess, (req, res) => {
+  const company = res.locals.company;
+  const { name } = req.body as { name?: string };
+  if (name && name.trim()) addStage(company.id, name.trim());
+  res.redirect(`/empresa/${company.id}/crm/etapas`);
+});
+
+app.post("/empresa/:companyId/crm/etapas/:stageId/renomear", requireCompanyAccess, (req, res) => {
+  const company = res.locals.company;
+  const { name } = req.body as { name?: string };
+  if (name && name.trim()) renameStage(company.id, Number(req.params.stageId), name.trim());
+  res.redirect(`/empresa/${company.id}/crm/etapas`);
+});
+
+app.post("/empresa/:companyId/crm/etapas/:stageId/mover", requireCompanyAccess, (req, res) => {
+  const company = res.locals.company;
+  const { direction } = req.body as { direction?: string };
+  reorderStage(company.id, Number(req.params.stageId), direction === "up" ? "up" : "down");
+  res.redirect(`/empresa/${company.id}/crm/etapas`);
+});
+
+app.post("/empresa/:companyId/crm/etapas/:stageId/excluir", requireCompanyAccess, (req, res) => {
+  const company = res.locals.company;
+  const result = deleteStage(company.id, Number(req.params.stageId));
+  if (!result.ok) {
+    res
+      .status(400)
+      .send(crmStagesPage({ company, user: res.locals.user, role: res.locals.membership.role, stages: listStages(company.id), error: result.error }));
+    return;
+  }
+  res.redirect(`/empresa/${company.id}/crm/etapas`);
+});
+
+// --- Dashboard: indicadores reais da empresa conectada ----------------------
+
+function todayIsoDate(): string {
+  return new Date().toISOString().slice(0, 10);
+}
+
+function daysAgoIsoDate(days: number): string {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() - days);
+  return d.toISOString().slice(0, 10);
+}
+
+app.get("/empresa/:companyId/dashboard", requireCompanyAccess, (req, res) => {
+  const company = res.locals.company;
+  const query = req.query as Record<string, string | undefined>;
+  const from = query.de || daysAgoIsoDate(29);
+  const to = query.ate || todayIsoDate();
+  const attendantUserId = query.atendente ? Number(query.atendente) : null;
+
+  const data = computeDashboard(company.id, company.timezone, company.sla_first_response_minutes, {
+    from,
+    to,
+    attendantUserId,
+  });
+
+  res.send(
+    dashboardPage({
+      company,
+      user: res.locals.user,
+      role: res.locals.membership.role,
+      isDev: IS_DEV,
+      canEditSla: res.locals.membership.role === "COMPANY_ADMIN",
+      members: listCompanyMembers(company.id),
+      filters: { from, to, attendantUserId },
+      data,
+    })
+  );
+});
+
+app.post("/empresa/:companyId/dashboard/meta-sla", requireCompanyAccess, (req, res) => {
+  const company = res.locals.company;
+  if (res.locals.membership.role !== "COMPANY_ADMIN") {
+    res.status(403).send("Apenas o administrador da empresa pode editar a meta.");
+    return;
+  }
+  const minutos = Number((req.body as { minutos?: string }).minutos);
+  if (Number.isFinite(minutos) && minutos > 0) {
+    updateSlaTarget(company.id, Math.round(minutos));
+  }
+  res.redirect(`/empresa/${company.id}/dashboard`);
+});
+
 // --- Demais páginas de navegação: ainda em estado vazio (etapas futuras) ----
 
 const NAV_PAGES: Record<string, { title: string; description: string }> = {
-  dashboard: {
-    title: "Nenhum dado ainda",
-    description:
-      "O dashboard vai mostrar pessoas aguardando atendimento, tempo de resposta humana e o resumo do período assim que essa etapa for implementada.",
-  },
-  crm: {
-    title: "Nenhuma oportunidade ainda",
-    description: "Contatos e oportunidades registrados vão aparecer aqui.",
-  },
   relatorios: {
     title: "Sem dados para o período",
     description: "Os relatórios por período vão aparecer aqui assim que houver atendimentos registrados.",

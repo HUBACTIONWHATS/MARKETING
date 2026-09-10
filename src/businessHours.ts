@@ -61,7 +61,7 @@ function getZonedParts(date: Date, timeZone: string) {
 }
 
 /** Converte um horário de parede (ano/mês/dia/hora/min, no fuso dado) para um instante UTC. */
-function zonedTimeToUtc(y: number, mo: number, d: number, h: number, mi: number, timeZone: string): Date {
+export function zonedTimeToUtc(y: number, mo: number, d: number, h: number, mi: number, timeZone: string): Date {
   const utcGuess = Date.UTC(y, mo - 1, d, h, mi, 0);
   const reading = getZonedParts(new Date(utcGuess), timeZone);
   const readingAsUtc = Date.UTC(reading.year, reading.month - 1, reading.day, reading.hour, reading.minute, reading.second);
@@ -101,4 +101,25 @@ export function businessMinutesBetween(start: Date, end: Date, timeZone: string,
   }
 
   return Math.round(totalMs / 60000);
+}
+
+/**
+ * Converte um intervalo de datas de calendário (formato "YYYY-MM-DD", inclusive
+ * dos dois lados) no fuso da empresa para um intervalo [início, fim) em UTC,
+ * pronto para comparar com timestamps ISO gravados no banco.
+ */
+export function localDayRangeToUtc(fromYmd: string, toYmd: string, timeZone: string): { startUtc: Date; endUtc: Date } {
+  const [fy, fm, fd] = fromYmd.split("-").map(Number);
+  const [ty, tm, td] = toYmd.split("-").map(Number);
+  const startUtc = zonedTimeToUtc(fy, fm, fd, 0, 0, timeZone);
+  const nextDayMarker = new Date(Date.UTC(ty, tm - 1, td) + 24 * 60 * 60 * 1000);
+  const endUtc = zonedTimeToUtc(
+    nextDayMarker.getUTCFullYear(),
+    nextDayMarker.getUTCMonth() + 1,
+    nextDayMarker.getUTCDate(),
+    0,
+    0,
+    timeZone
+  );
+  return { startUtc, endUtc };
 }

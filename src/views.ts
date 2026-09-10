@@ -1,6 +1,10 @@
 import type { AuthorType, Conversation, ConversationListItem, ConversationStatus, Message, WaitSummary } from "./attendance";
 import type { BusinessHours, WeekdayKey } from "./businessHours";
+import type { OpportunityWithDetails, PipelineStage } from "./crm";
+import type { DashboardData, DashboardFilters } from "./dashboard";
 import type { Company, MembershipWithCompany, Role, User } from "./models";
+
+type CompanyMember = { user_id: number; name: string; role: Role };
 
 export function escapeHtml(value: string): string {
   return value
@@ -214,6 +218,60 @@ const BASE_STYLE = `
   .success { color: #4ade80; font-size: 0.85rem; margin: 0 0 1rem; }
   .checkbox-line { display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; color: #cbd5e1; }
   .checkbox-line input { width: auto; }
+
+  /* CRM */
+  input[type="text"], input[type="number"], input[type="email"], input[type="password"],
+  input[type="date"], input[type="datetime-local"] {
+    width: 100%;
+    padding: 0.5rem 0.6rem;
+    border-radius: 6px;
+    border: 1px solid #334155;
+    background: #0b1220;
+    color: #f8fafc;
+    font-size: 0.9rem;
+  }
+  details.panel > summary { cursor: pointer; font-weight: 600; color: #38bdf8; list-style: none; }
+  details.panel > summary::-webkit-details-marker { display: none; }
+  details.panel[open] > summary { margin-bottom: 1rem; }
+  .stage-section { margin-bottom: 1.25rem; }
+  .stage-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 0.6rem; }
+  .stage-head h3 { margin: 0; text-transform: none; font-size: 1rem; color: #f8fafc; letter-spacing: 0; }
+  .opp-card { border: 1px solid #1f2937; border-radius: 8px; padding: 0.85rem 1rem; margin-bottom: 0.6rem; }
+  .opp-card .title { font-weight: 600; }
+  .opp-card .meta-row { font-size: 0.78rem; color: #94a3b8; margin: 0.2rem 0 0.5rem; display: flex; gap: 0.9rem; flex-wrap: wrap; }
+  .opp-card form { margin-top: 0.5rem; }
+  .lost-reason { color: #f87171; font-size: 0.78rem; }
+  .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 0.7rem; }
+
+  /* Dashboard */
+  .metrics-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0.9rem; }
+  .metric-card { border: 1px solid #1f2937; border-radius: 10px; padding: 1rem; background: #111827; }
+  .metric-card .value { font-size: 1.6rem; font-weight: 700; margin: 0.15rem 0; }
+  .metric-card .label { font-size: 0.78rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 0.03em; }
+  .metric-card .help { font-size: 0.75rem; color: #64748b; margin-top: 0.35rem; }
+  .section-title { font-size: 1rem; margin: 1.75rem 0 0.75rem; color: #f8fafc; }
+  .section-title:first-of-type { margin-top: 0; }
+  .demo-banner {
+    background: #78350f;
+    color: #fde68a;
+    border-radius: 8px;
+    padding: 0.6rem 1rem;
+    font-size: 0.8rem;
+    margin-bottom: 1.25rem;
+  }
+  .filters-form { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: end; margin-bottom: 1.25rem; }
+  .filters-form .field { margin-bottom: 0; min-width: 150px; }
+
+  @media (max-width: 720px) {
+    .layout { flex-direction: column; }
+    .sidebar { width: 100%; border-right: none; border-bottom: 1px solid #1f2937; padding: 0.75rem; }
+    .sidebar nav { display: flex; overflow-x: auto; gap: 0.25rem; }
+    .sidebar nav a { white-space: nowrap; margin-bottom: 0; }
+    .sidebar .brand { display: none; }
+    .content { padding: 1.1rem; }
+    .grid-2 { grid-template-columns: 1fr; }
+    .card { max-width: 100%; }
+  }
 `;
 
 function page(title: string, body: string): string {
@@ -510,6 +568,9 @@ export function conversationDetailPage(opts: {
     conv.status !== "ENCERRADO"
       ? `<form method="post" action="/empresa/${opts.company.id}/conversas/${conv.id}/assumir" style="display:inline">
           <button type="submit" class="btn">Assumir atendimento</button>
+        </form>
+        <form method="post" action="/empresa/${opts.company.id}/conversas/${conv.id}/encerrar" style="display:inline">
+          <button type="submit" class="btn btn-danger">Encerrar atendimento</button>
         </form>`
       : "";
 
@@ -621,5 +682,278 @@ export function settingsPage(opts: {
         </table>
         ${opts.canEdit ? '<div style="margin-top:1rem"><button type="submit" class="btn btn-primary">Salvar</button></div>' : '<p class="meta" style="margin-top:1rem">Apenas o administrador da empresa pode editar.</p>'}
       </form>`,
+  });
+}
+
+// --- CRM: funil de oportunidades ---------------------------------------------
+
+function formatCurrencyCents(cents: number): string {
+  return new Intl.NumberFormat("pt-BR", { style: "currency", currency: "BRL" }).format(cents / 100);
+}
+
+function formatDateShort(iso: string | null): string | null {
+  if (!iso) return null;
+  return new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" });
+}
+
+export function crmPage(opts: {
+  company: Company;
+  user: User;
+  role: Role;
+  stages: PipelineStage[];
+  byStage: Map<number, OpportunityWithDetails[]>;
+  members: CompanyMember[];
+  error?: string;
+}): string {
+  const memberOptions = (selected: number | null) =>
+    `<option value="">Sem responsável</option>` +
+    opts.members
+      .map((m) => `<option value="${m.user_id}" ${m.user_id === selected ? "selected" : ""}>${escapeHtml(m.name)}</option>`)
+      .join("");
+
+  const stageOptions = (currentStageId: number) =>
+    opts.stages
+      .map((s) => `<option value="${s.id}" ${s.id === currentStageId ? "selected" : ""}>${escapeHtml(s.name)}</option>`)
+      .join("");
+
+  const sections = opts.stages
+    .map((stage) => {
+      const items = opts.byStage.get(stage.id) ?? [];
+      const totalCents = items.reduce((sum, o) => sum + o.value_cents, 0);
+      const cards = items
+        .map((o) => {
+          const scheduled = formatDateShort(o.scheduled_at);
+          return `<div class="opp-card">
+            <div class="title">${escapeHtml(o.title)}</div>
+            <div class="meta-row">
+              <span>${escapeHtml(o.contact_name)} &middot; ${escapeHtml(o.contact_phone)}</span>
+              <span>${formatCurrencyCents(o.value_cents)}</span>
+              <span>${o.responsible_name ? escapeHtml(o.responsible_name) : "Sem responsável"}</span>
+              ${scheduled ? `<span>Agendado: ${scheduled}</span>` : ""}
+            </div>
+            ${o.lost_reason ? `<div class="lost-reason">Motivo da perda: ${escapeHtml(o.lost_reason)}</div>` : ""}
+            <form method="post" action="/empresa/${opts.company.id}/crm/oportunidades/${o.id}/mover" class="inline-form" style="flex-wrap:wrap">
+              <select name="stage_id" style="flex:1;min-width:140px">${stageOptions(o.stage_id)}</select>
+              <input type="text" name="lost_reason" placeholder="Motivo (só se for p/ Perdido)" style="flex:1;min-width:160px" />
+              <button type="submit" class="btn btn-small">Mover</button>
+            </form>
+            <details>
+              <summary style="cursor:pointer;color:#94a3b8;font-size:0.78rem;margin-top:0.4rem">Editar responsável / valor / agendamento</summary>
+              <form method="post" action="/empresa/${opts.company.id}/crm/oportunidades/${o.id}/editar" class="form-grid" style="margin-top:0.5rem">
+                <label>Responsável<select name="responsible_user_id">${memberOptions(o.responsible_user_id)}</select></label>
+                <label>Valor (R$)<input type="number" step="0.01" min="0" name="value" value="${(o.value_cents / 100).toFixed(2)}" /></label>
+                <label>Agendamento<input type="datetime-local" name="scheduled_at" value="${o.scheduled_at ? o.scheduled_at.slice(0, 16) : ""}" /></label>
+                <div style="align-self:end"><button type="submit" class="btn btn-small">Salvar</button></div>
+              </form>
+            </details>
+          </div>`;
+        })
+        .join("");
+
+      return `<section class="stage-section">
+        <div class="stage-head">
+          <h3>${escapeHtml(stage.name)} <span class="meta">(${items.length})</span></h3>
+          <span class="badge">${formatCurrencyCents(totalCents)}</span>
+        </div>
+        ${cards || '<p class="meta">Nenhuma oportunidade nesta etapa.</p>'}
+      </section>`;
+    })
+    .join("");
+
+  return appShell({
+    company: opts.company,
+    user: opts.user,
+    role: opts.role,
+    active: "crm",
+    body: `<div class="toolbar">
+        <h2 style="margin:0">CRM — Funil de vendas</h2>
+        <a href="/empresa/${opts.company.id}/crm/etapas" class="btn btn-small">Configurar etapas</a>
+      </div>
+      ${opts.error ? `<p class="error">${escapeHtml(opts.error)}</p>` : ""}
+      <details class="panel" style="margin-bottom:1.5rem">
+        <summary>+ Nova oportunidade</summary>
+        <form method="post" action="/empresa/${opts.company.id}/crm/oportunidades" class="form-grid">
+          <label>Nome do contato<input type="text" name="contact_name" required /></label>
+          <label>Telefone<input type="text" name="contact_phone" required /></label>
+          <label>Título da oportunidade<input type="text" name="title" required placeholder="Ex: Plano mensal" /></label>
+          <label>Valor (R$)<input type="number" step="0.01" min="0" name="value" value="0.00" /></label>
+          <label>Responsável<select name="responsible_user_id">${memberOptions(null)}</select></label>
+          <label>Agendamento (opcional)<input type="datetime-local" name="scheduled_at" /></label>
+          <div style="align-self:end"><button type="submit" class="btn btn-primary">Criar oportunidade</button></div>
+        </form>
+      </details>
+      ${sections}`,
+  });
+}
+
+export function crmStagesPage(opts: { company: Company; user: User; role: Role; stages: PipelineStage[]; error?: string }): string {
+  const rows = opts.stages
+    .map((s, idx) => {
+      const protectedStage = s.is_won || s.is_lost;
+      const tag = s.is_won ? '<span class="badge badge-humano">venda concluída</span>' : s.is_lost ? '<span class="badge badge-encerrado">perdido</span>' : "";
+      return `<li style="flex-direction:column;align-items:stretch;gap:0.5rem">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <span>${escapeHtml(s.name)} ${tag}</span>
+          <span style="display:flex;gap:0.3rem">
+            <form method="post" action="/empresa/${opts.company.id}/crm/etapas/${s.id}/mover" style="display:inline">
+              <input type="hidden" name="direction" value="up" />
+              <button type="submit" class="btn btn-small" ${idx === 0 ? "disabled" : ""}>&uarr;</button>
+            </form>
+            <form method="post" action="/empresa/${opts.company.id}/crm/etapas/${s.id}/mover" style="display:inline">
+              <input type="hidden" name="direction" value="down" />
+              <button type="submit" class="btn btn-small" ${idx === opts.stages.length - 1 ? "disabled" : ""}>&darr;</button>
+            </form>
+          </span>
+        </div>
+        <form method="post" action="/empresa/${opts.company.id}/crm/etapas/${s.id}/renomear" class="inline-form">
+          <input type="text" name="name" value="${escapeHtml(s.name)}" />
+          <button type="submit" class="btn btn-small">Renomear</button>
+        </form>
+        ${
+          protectedStage
+            ? '<p class="meta">Etapa de encerramento do funil — não pode ser excluída.</p>'
+            : `<form method="post" action="/empresa/${opts.company.id}/crm/etapas/${s.id}/excluir">
+                <button type="submit" class="btn btn-small btn-danger">Excluir etapa</button>
+              </form>`
+        }
+      </li>`;
+    })
+    .join("");
+
+  return appShell({
+    company: opts.company,
+    user: opts.user,
+    role: opts.role,
+    active: "crm",
+    body: `<div class="toolbar">
+        <h2 style="margin:0">Configurar etapas do funil</h2>
+        <a href="/empresa/${opts.company.id}/crm" class="btn btn-small">&larr; Voltar ao CRM</a>
+      </div>
+      ${opts.error ? `<p class="error">${escapeHtml(opts.error)}</p>` : ""}
+      <ul class="conv-list">${rows}</ul>
+      <div class="panel">
+        <h3>Adicionar etapa</h3>
+        <form method="post" action="/empresa/${opts.company.id}/crm/etapas" class="inline-form">
+          <input type="text" name="name" required placeholder="Nome da nova etapa" />
+          <button type="submit" class="btn btn-primary">Adicionar</button>
+        </form>
+      </div>`,
+  });
+}
+
+// --- Dashboard -----------------------------------------------------------------
+
+function metricCard(label: string, value: string, help: string): string {
+  return `<div class="metric-card">
+    <div class="label">${escapeHtml(label)}</div>
+    <div class="value">${value}</div>
+    <div class="help">${escapeHtml(help)}</div>
+  </div>`;
+}
+
+export function dashboardPage(opts: {
+  company: Company;
+  user: User;
+  role: Role;
+  isDev: boolean;
+  canEditSla: boolean;
+  members: CompanyMember[];
+  filters: DashboardFilters;
+  data: DashboardData | null;
+}): string {
+  const attendantOptions =
+    `<option value="">Todos</option>` +
+    opts.members
+      .map(
+        (m) => `<option value="${m.user_id}" ${m.user_id === opts.filters.attendantUserId ? "selected" : ""}>${escapeHtml(m.name)}</option>`
+      )
+      .join("");
+
+  const filtersForm = `<form method="get" class="filters-form">
+    <div class="field"><label>De<input type="date" name="de" value="${opts.filters.from}" /></label></div>
+    <div class="field"><label>Até<input type="date" name="ate" value="${opts.filters.to}" /></label></div>
+    <div class="field"><label>Atendente<select name="atendente">${attendantOptions}</select></label></div>
+    <div class="field"><button type="submit" class="btn btn-primary">Aplicar filtros</button></div>
+  </form>`;
+
+  const demoBanner = opts.isDev
+    ? `<div class="demo-banner">⚠️ Ambiente de teste — todos os dados aqui são fictícios (modo de demonstração), sem conexão com WhatsApp real.</div>`
+    : "";
+
+  if (!opts.data || !opts.data.hasAnyData) {
+    return appShell({
+      company: opts.company,
+      user: opts.user,
+      role: opts.role,
+      active: "dashboard",
+      body: `${demoBanner}<h2>Dashboard</h2>${filtersForm}${emptyState(
+        "Nenhum dado ainda",
+        "Assim que houver contatos, conversas ou oportunidades registrados, os indicadores aparecem aqui."
+      )}`,
+    });
+  }
+
+  const d = opts.data;
+
+  const slaForm = `<form method="post" action="/empresa/${opts.company.id}/dashboard/meta-sla" class="inline-form" style="max-width:360px">
+    <label style="flex:1">Meta de 1ª resposta humana (minutos)
+      <input type="number" min="1" name="minutos" value="${d.slaTargetMinutes}" ${opts.canEditSla ? "" : "disabled"} />
+    </label>
+    ${opts.canEditSla ? '<button type="submit" class="btn btn-small" style="align-self:end">Salvar</button>' : ""}
+  </form>`;
+
+  const funnelSection = `<h3 class="section-title">Funil no período</h3>
+    <div class="metrics-grid">
+      ${metricCard("Novos contatos", String(d.newContacts), "Contatos criados dentro do período selecionado.")}
+      ${metricCard("Oportunidades", String(d.opportunitiesCreated), "Oportunidades criadas no período (filtra por responsável).")}
+      ${metricCard("Agendamentos", String(d.scheduledCount), "Oportunidades com data de agendamento dentro do período.")}
+      ${metricCard(
+        "Vendas e receita",
+        `${d.wonCount} &middot; ${formatCurrencyCents(d.wonRevenueCents)}`,
+        "Oportunidades movidas para 'Venda concluída' com fechamento dentro do período; receita é a soma dos valores."
+      )}
+    </div>`;
+
+  const pendingSection = `<h3 class="section-title">Pendências agora</h3>
+    <div class="metrics-grid">
+      ${metricCard("Aguardando humano", String(d.waitingNow), "Conversas com espera aberta neste exato momento (não é filtrado por período).")}
+      ${metricCard(
+        "Maior espera atual",
+        d.longestWaitMs !== null ? formatDuration(d.longestWaitMs) : "—",
+        "Tempo corrido do episódio de espera mais antigo ainda em aberto agora."
+      )}
+    </div>`;
+
+  const completedSection = `<h3 class="section-title">Espera humana concluída no período</h3>
+    <div class="metrics-grid">
+      ${metricCard(
+        "Média 1ª resposta",
+        d.firstResponse.avgMinutes !== null ? formatMinutes(d.firstResponse.avgMinutes) : "—",
+        `Média do tempo corrido entre o pedido de atendente e a 1ª resposta humana enviada com sucesso (${d.firstResponse.count} atendimento(s) no período).`
+      )}
+      ${metricCard(
+        "Mediana 1ª resposta",
+        d.firstResponse.medianMinutes !== null ? formatMinutes(d.firstResponse.medianMinutes) : "—",
+        "Valor do meio da mesma lista de tempos — menos sensível a casos extremos do que a média."
+      )}
+      ${metricCard(
+        "Dentro do prazo",
+        d.firstResponse.withinSlaPercent !== null ? `${d.firstResponse.withinSlaPercent}%` : "—",
+        `Percentual das 1ªs respostas concluídas em até ${d.slaTargetMinutes} min (tempo corrido). Meta editável abaixo.`
+      )}
+      ${metricCard(
+        "Encerrados sem resposta",
+        String(d.closedWithoutReply),
+        "Atendimentos encerrados no período em que nenhuma resposta humana foi enviada com sucesso."
+      )}
+    </div>
+    <div style="margin-top:0.75rem">${slaForm}</div>`;
+
+  return appShell({
+    company: opts.company,
+    user: opts.user,
+    role: opts.role,
+    active: "dashboard",
+    body: `${demoBanner}<h2>Dashboard</h2>${filtersForm}${funnelSection}${pendingSection}${completedSection}`,
   });
 }

@@ -45,6 +45,7 @@ export interface WaitEpisode {
   started_at: string;
   ended_at: string | null;
   ended_reason: "RESPOSTA_HUMANA" | null;
+  ended_by_user_id: number | null;
   created_at: string;
 }
 
@@ -168,10 +169,20 @@ export function startWaitIfNeeded(companyId: number, conversationId: number, at:
 }
 
 /** Só uma resposta humana enviada com sucesso deve chamar isto (ver addMessage). */
-export function endOpenWaitEpisode(conversationId: number, reason: "RESPOSTA_HUMANA", at: string = nowIso()): void {
+export function endOpenWaitEpisode(
+  conversationId: number,
+  reason: "RESPOSTA_HUMANA",
+  endedByUserId: number | null,
+  at: string = nowIso()
+): void {
   const open = findOpenWaitEpisode(conversationId);
   if (!open) return;
-  db.prepare("UPDATE wait_episodes SET ended_at = ?, ended_reason = ? WHERE id = ?").run(at, reason, open.id);
+  db.prepare("UPDATE wait_episodes SET ended_at = ?, ended_reason = ?, ended_by_user_id = ? WHERE id = ?").run(
+    at,
+    reason,
+    endedByUserId,
+    open.id
+  );
 }
 
 export interface WaitSummary {
@@ -262,7 +273,7 @@ export function addMessage(input: AddMessageInput): Message {
 
   if (input.authorType === "HUMANO") {
     if (sendStatus === "ENVIADA") {
-      endOpenWaitEpisode(input.conversationId, "RESPOSTA_HUMANA", at);
+      endOpenWaitEpisode(input.conversationId, "RESPOSTA_HUMANA", input.authorUserId ?? null, at);
       setConversationStatus(input.conversationId, "AGUARDANDO_CLIENTE", at);
     }
     // send_status FALHOU: nada muda além da mensagem registrada como falha.

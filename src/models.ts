@@ -8,6 +8,7 @@ export interface Company {
   slug: string;
   timezone: string;
   business_hours: string; // JSON — ver src/businessHours.ts
+  sla_first_response_minutes: number;
   created_at: string;
 }
 
@@ -75,4 +76,20 @@ export function updateCompanySettings(companyId: number, timezone: string, busin
     businessHoursJson,
     companyId
   );
+}
+
+export function updateSlaTarget(companyId: number, minutes: number): void {
+  db.prepare("UPDATE companies SET sla_first_response_minutes = ? WHERE id = ?").run(minutes, companyId);
+}
+
+/** Membros (admin + atendentes) de uma empresa, para preencher filtros e seletores de responsável. */
+export function listCompanyMembers(companyId: number): { user_id: number; name: string; role: Role }[] {
+  return db
+    .prepare(
+      `SELECT u.id AS user_id, u.name, m.role
+       FROM memberships m JOIN users u ON u.id = m.user_id
+       WHERE m.company_id = ?
+       ORDER BY u.name`
+    )
+    .all(companyId) as { user_id: number; name: string; role: Role }[];
 }

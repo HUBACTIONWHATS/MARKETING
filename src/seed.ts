@@ -5,6 +5,7 @@
  */
 import { addMessage, createConversation, findOrCreateContact } from "./attendance";
 import { hashPassword } from "./auth";
+import { createOpportunity, ensureDefaultPipelineStages } from "./crm";
 import { db, runMigrations } from "./db";
 
 function upsertCompany(name: string, slug: string): number {
@@ -50,6 +51,21 @@ function seedDemoConversation(companyId: number, contactName: string, phone: str
   addMessage({ companyId, conversationId: conv.id, authorType: "CLIENTE", body: firstMessage });
 }
 
+/** Cria uma oportunidade de demonstração (dado de teste), se o contato ainda não existir. */
+function seedDemoOpportunity(
+  companyId: number,
+  contactName: string,
+  phone: string,
+  title: string,
+  valueCents: number,
+  responsibleUserId: number
+): void {
+  const existing = db.prepare("SELECT id FROM contacts WHERE company_id = ? AND phone = ?").get(companyId, phone);
+  if (existing) return;
+  const contact = findOrCreateContact(companyId, contactName, phone);
+  createOpportunity({ companyId, contactId: contact.id, title, valueCents, responsibleUserId });
+}
+
 function main(): void {
   if (process.env.NODE_ENV === "production") {
     console.error(
@@ -77,6 +93,11 @@ function main(): void {
 
   seedDemoConversation(empresaAId, "Cliente Demo A", "+55 11 90000-1001", "minha internet caiu, quero falar com atendente");
   seedDemoConversation(empresaBId, "Cliente Demo B", "+55 21 90000-2001", "preciso de suporte, chama um atendente por favor");
+
+  ensureDefaultPipelineStages(empresaAId);
+  ensureDefaultPipelineStages(empresaBId);
+  seedDemoOpportunity(empresaAId, "Lead Demo A", "+55 11 90000-1002", "Plano mensal", 19900, adminAId);
+  seedDemoOpportunity(empresaBId, "Lead Demo B", "+55 21 90000-2002", "Plano anual", 149000, adminBId);
 
   console.log("Seed de desenvolvimento aplicado (dados de teste, não usar em produção):");
   console.log(`- admin@hubaction.dev / trocar123 (administrador da plataforma) [id ${platformAdminId}]`);
