@@ -31,7 +31,8 @@ Este arquivo existe para retomar o projeto em qualquer sessão futura do Claude 
 Ver detalhes e justificativa em [PROGRESSO.md](PROGRESSO.md).
 
 - Aplicação única em TypeScript/Node, servidor Express.
-- Banco de dados: PostgreSQL não está instalado no ambiente local (sem `psql`, sem Docker). Alternativa leve adotada por enquanto: **SQLite** (via driver a definir quando o primeiro módulo de dados for implementado), migrável para PostgreSQL depois trocando a connection string / provider do ORM. Nenhum ORM foi instalado ainda — será adicionado só quando houver necessidade real de persistência.
+- Banco de dados: PostgreSQL não está instalado no ambiente local (sem `psql`, sem Docker). Alternativa leve adotada: **SQLite via `better-sqlite3`**, com migrações em SQL puro (`migrations/*.sql` + runner em `src/db.ts`). Prisma foi avaliado e descartado nesta fase: a versão instalada (`prisma@7`) é um CLI de plataforma em nuvem, não o fluxo local clássico — ver justificativa completa em [PROGRESSO.md](PROGRESSO.md). Migração futura para PostgreSQL: trocar o driver e ajustar o SQL (dialeto próximo).
+- Isolamento multi-tenant aplicado no servidor via tabela `memberships` (usuário × empresa × perfil) e middleware que checa essa associação a cada requisição — nunca só por filtro de UI.
 
 ## Produto (resumo do escopo, não repetir ao usuário)
 
