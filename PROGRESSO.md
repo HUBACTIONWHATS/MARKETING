@@ -378,3 +378,37 @@ Testar com o número de teste da Meta continua disponível (CONEXAO_WHATSAPP.md)
 - Sem limite de tentativas de login, sem CSRF além de `sameSite=lax`, sem 2FA; credenciais do WhatsApp globais por instalação (um número real por servidor).
 - Diagnóstico da mensagem real ao número de teste ainda em aberto; plataforma do robô ainda não identificada.
 - Aguardando sua revisão e autorização para a próxima etapa (migração do banco e/ou publicação).
+
+## Etapa concluída: Etapa 9 — Migração para PostgreSQL (Neon), SQLite mantido para desenvolvimento
+
+Autorizada pelo usuário: Neon (gratuito) para o piloto, Render gratuito **só como demonstração externa** (adormece; não confiável para webhooks em tempo real). **Nenhuma conta foi criada, nada foi publicado, nada foi pago.** WhatsApp e robô seguem pendentes.
+
+### Decisões
+
+- **Uma camada, dois motores** ([src/db.ts](src/db.ts)): API assíncrona única (`get/all/run/exec/transaction`), escolhida por `DATABASE_URL` (Postgres via `pg`) ou `DATABASE_FILE` (SQLite via `better-sqlite3`). Nenhuma regra de negócio foi duplicada — só o adaptador e o DDL diferem por dialeto.
+- **Diferenças de dialeto ficam no adaptador**: placeholders `?` → `$n` no Postgres; `COUNT/SUM` (bigint/numeric) convertidos para número; transações com `BEGIN/COMMIT/ROLLBACK` num cliente dedicado no Postgres; no SQLite as chamadas são síncronas (resolvem em microtask, então um bloco `transaction` não intercala com outras requisições).
+- **SQL portável no código**: todo INSERT que precisa do id usa `RETURNING id` (funciona nos dois); timestamps ISO sempre gravados pela aplicação (removido todo `datetime('now')`, inclusive em `createCompany`, seed e convites); parâmetros nulos comparados com `CAST(? AS INTEGER) IS NULL` (o Postgres não infere o tipo de `? IS NULL`); `sessions.expires_at` é `BIGINT` no Postgres (milissegundos estouram INTEGER de 32 bits).
+- **Migrações por dialeto**: as 8 migrações antigas foram movidas para `migrations/sqlite/` (mesmos nomes — o `_migrations` do banco de demonstração continua válido); `migrations/postgres/0001_baseline.sql` é o esquema completo equivalente. Regra registrada em INSTRUCOES_PROJETO.md: migração nova = arquivo nas duas pastas.
+- **Tudo virou `async`** (attendance, crm, dashboard, models, auth, access, whatsapp, sessionStore, seed, conectar-whatsapp, server): handlers do Express são `async`; `runMigrations()` é aguardado antes do `listen`; erro não tratado numa rota vira 500 genérico sem stack trace (handler de erro adicionado).
+- **Teste no motor real**: `npm run test:pg` sobe um PostgreSQL de verdade (binários oficiais via `embedded-postgres`, dependência só de desenvolvimento, sem instalar nada no sistema) e roda a mesma suíte; cada arquivo de teste usa um schema próprio (`TEST_SCHEMA=test_*`, recriado a cada execução — só schemas com prefixo `test_` podem ser apagados). `npm run dev:pg` sobe um Postgres local persistente para usar a aplicação contra ele.
+- **Neon**: a string de conexão entra por `DATABASE_URL` (segredo, só no `.env`/hospedagem); `sslmode`/`channel_binding` da string são ignorados e o TLS é decidido por `DATABASE_SSL` (`require` por padrão fora de localhost, com verificação de certificado). Passo a passo para o usuário criar a conta e o banco em [PUBLICACAO.md](PUBLICACAO.md).
+- O workflow de conversão em paralelo (subagentes) foi recusado pelo limite de sessão; a conversão foi feita diretamente, módulo a módulo, com `tsc` e testes a cada bloco.
+
+### Verificado
+
+- `npx tsc --noEmit` limpo.
+- **SQLite: 58/58** (`npm test`). **PostgreSQL real local: 58/58** (`npm run test:pg`) — inclusive transações com rollback, `ON CONFLICT` do store de sessão, índice único parcial de `external_id`, `RETURNING id`, `SUM` como número, filtros com parâmetro nulo.
+- Ponta a ponta no Postgres com a aplicação real: seed → login das três contas → isolamento (A não vê B, B não vê A, Hub Action não entra na empresa, conversa de A inacessível pelo id para B, oportunidade de A invisível para B) → fluxo do robô (menu + "3" → espera com gatilho OPCAO_3) → CRM → dashboard → **reinício só da aplicação** (sessão e dados preservados, indicadores idênticos) → **reinício da aplicação e do banco** (conversa, cronômetro e oportunidade continuam lá).
+- Banco de demonstração SQLite existente continua migrando/semeando normalmente após mover as migrações de pasta.
+
+### Depende de você (nada disso é feito por mim)
+
+1. Criar a conta e o projeto na Neon (passo a passo em PUBLICACAO.md, seção 2) e colocar a connection string em `DATABASE_URL` no seu `.env` — sem me enviar o valor.
+2. Rodar `npm run db:seed` e `npm run dev` para confirmar a aplicação contra a Neon a partir do seu computador (o `/health` mostra `"db":"postgres"`).
+3. Confirmar quando quiser que eu prepare o Render (só demonstração; adormece).
+
+### Pendências reais
+
+- A conexão com a Neon em si só pode ser confirmada depois do passo 1 acima (SSL/certificado, região, latência do "acordar" do compute).
+- Render não configurado (aguardando confirmação). Número comercial, recebimento/envio reais e robô: pendentes.
+- `embedded-postgres` é dependência de desenvolvimento (~binários do Postgres baixados no `npm install`); não vai para produção.

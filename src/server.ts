@@ -29,6 +29,7 @@ import {
   listWaitEpisodes,
   summarizeWait,
   updateMessageDeliveryStatus,
+  type Conversation,
   type ConversationMode,
 } from "./attendance";
 import { parseBusinessHours, zonedTimeToUtc, type BusinessHours, type WeekdayKey } from "./businessHours";
@@ -45,7 +46,7 @@ import {
   updateOpportunityDetails,
 } from "./crm";
 import { computeDashboard } from "./dashboard";
-import { runMigrations } from "./db";
+import { db, runMigrations } from "./db";
 import {
   createCompany,
   findCompanyById,
@@ -92,8 +93,6 @@ import {
   settingsPage,
 } from "./views";
 
-runMigrations();
-
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
 const IS_DEV = process.env.NODE_ENV !== "production";
@@ -132,7 +131,7 @@ function clientIp(req: express.Request): string {
 }
 
 app.get("/health", (_req, res) => {
-  res.json({ status: "ok" });
+  res.json({ status: "ok", db: db.dialect });
 });
 
 // --- Webhook oficial do WhatsApp (Meta Cloud API) ---------------------------
@@ -184,7 +183,7 @@ app.post("/webhooks/whatsapp", whatsappJsonParser, async (req, res) => {
   // sim, deixam o handler estourar para virar 500 e pedir nova tentativa.
   const entries = parseWebhookPayload(req.body);
   for (const entry of entries) {
-    const connection = findConnectionByPhoneNumberId(entry.phoneNumberId);
+    const connection = await findConnectionByPhoneNumberId(entry.phoneNumberId);
     if (!connection) {
       if (entry.messages.length > 0 || entry.statuses.length > 0) {
         console.warn(`[whatsapp] evento recebido para phone_number_id ${entry.phoneNumberId}, sem empresa associada.`);
@@ -192,15 +191,15 @@ app.post("/webhooks/whatsapp", whatsappJsonParser, async (req, res) => {
       continue;
     }
     for (const msg of entry.messages) {
-      const contact = findOrCreateContact(connection.company_id, msg.contactName ?? msg.fromPhone, msg.fromPhone);
-      const conv = findOrCreateOpenConversation(connection.company_id, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
+      const contact = await findOrCreateContact(connection.company_id, msg.contactName ?? msg.fromPhone, msg.fromPhone);
+      const conv = await findOrCreateOpenConversation(connection.company_id, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
       // Botão oficial cujo texto bate com pedido de atendente = gatilho B; qualquer outro clique é uma mensagem normal.
       const platformSignal = msg.isInteractiveReply && detectHumanRequest(msg.body) ? "BOTAO_PLATAFORMA" : undefined;
       // A Meta manda o timestamp (segundos Unix) de quando o cliente enviou —
       // é ele que vale para o cronômetro, mesmo se a entrega atrasar.
       const ts = Number(msg.timestamp);
       const occurredAt = Number.isFinite(ts) && ts > 0 ? new Date(ts * 1000).toISOString() : null;
-      addMessage({
+      await addMessage({
         companyId: connection.company_id,
         conversationId: conv.id,
         authorType: "CLIENTE",
@@ -215,9 +214,9 @@ app.post("/webhooks/whatsapp", whatsappJsonParser, async (req, res) => {
     }
     for (const status of entry.statuses) {
       if (status.status === "delivered") {
-        updateMessageDeliveryStatus(connection.company_id, status.waMessageId, "ENTREGUE");
+        await updateMessageDeliveryStatus(connection.company_id, status.waMessageId, "ENTREGUE");
       } else if (status.status === "read") {
-        updateMessageDeliveryStatus(connection.company_id, status.waMessageId, "LIDA");
+        await updateMessageDeliveryStatus(connection.company_id, status.waMessageId, "LIDA");
       } else if (status.status === "failed") {
         console.warn(`[whatsapp] Meta reportou falha de entrega para ${status.waMessageId} (conversa não é reaberta automaticamente).`);
       }
@@ -234,11 +233,11 @@ app.get("/login", (req, res) => {
   res.send(loginPage());
 });
 
-app.post("/login", (req, res) => {
+app.post("/login", async (req, res) => {
   const { email, password } = req.body as { email?: string; password?: string };
-  const user = email ? findUserByEmail(email.trim().toLowerCase()) ?? findUserByEmail(email.trim()) : undefined;
+  const user = email ? (await findUserByEmail(email.trim().toLowerCase())) ?? (await findUserByEmail(email.trim())) : undefined;
   if (!user || !password || !verifyPassword(password, user.password_hash) || !user.active) {
-    audit("login_falhou", { userId: user?.id ?? null, detail: email ? `e-mail: ${email.trim().slice(0, 120)}` : undefined, ip: clientIp(req) });
+    await audit("login_falhou", { userId: user?.id ?? null, detail: email ? `e-mail: ${email.trim().slice(0, 120)}` : undefined, ip: clientIp(req) });
     res.status(401).send(loginPage("E-mail ou senha inválidos."));
     return;
   }
@@ -248,17 +247,17 @@ app.post("/login", (req, res) => {
       return;
     }
     req.session.userId = user.id;
-    audit("login_ok", { userId: user.id, ip: clientIp(req) });
+    audit("login_ok", { userId: user.id, ip: clientIp(req) }).catch((e) => console.error("[audit]", e));
     res.redirect("/");
   });
 });
 
 // --- Convite (cria acesso) e redefinição de senha por link ----------------
 
-app.get("/convite/:token", (req, res) => {
+app.get("/convite/:token", async (req, res) => {
   const token = String(req.params.token);
-  const invite = findValidToken("CONVITE", token);
-  const company = invite?.company_id ? findCompanyById(invite.company_id) : undefined;
+  const invite = await findValidToken("CONVITE", token);
+  const company = invite?.company_id ? await findCompanyById(invite.company_id) : undefined;
   if (!invite || !company) {
     res.status(404).send(messagePage("Convite inválido", "Este convite não existe, já foi usado ou expirou. Peça um novo link a quem te convidou."));
     return;
@@ -266,11 +265,11 @@ app.get("/convite/:token", (req, res) => {
   res.send(invitePage({ token, email: invite.email, companyName: company.name }));
 });
 
-app.post("/convite/:token", (req, res) => {
+app.post("/convite/:token", async (req, res) => {
   const token = String(req.params.token);
   const { name, password } = req.body as { name?: string; password?: string };
-  const invite = findValidToken("CONVITE", token);
-  const company = invite?.company_id ? findCompanyById(invite.company_id) : undefined;
+  const invite = await findValidToken("CONVITE", token);
+  const company = invite?.company_id ? await findCompanyById(invite.company_id) : undefined;
   if (!invite || !company) {
     res.status(404).send(messagePage("Convite inválido", "Este convite não existe, já foi usado ou expirou."));
     return;
@@ -279,33 +278,33 @@ app.post("/convite/:token", (req, res) => {
     res.status(400).send(invitePage({ token, email: invite.email, companyName: company.name, error: "Informe seu nome." }));
     return;
   }
-  const result = acceptInvite(token, name, password ?? "");
+  const result = await acceptInvite(token, name, password ?? "");
   if (!result.ok) {
     res.status(400).send(invitePage({ token, email: invite.email, companyName: company.name, error: result.error }));
     return;
   }
-  audit("convite_aceito", { companyId: company.id, userId: result.userId, detail: invite.email, ip: clientIp(req) });
+  await audit("convite_aceito", { companyId: company.id, userId: result.userId, detail: invite.email, ip: clientIp(req) });
   res.send(messagePage("Acesso criado", `Pronto! Entre com o e-mail ${invite.email} e a senha que você acabou de criar.`));
 });
 
-app.get("/redefinir/:token", (req, res) => {
+app.get("/redefinir/:token", async (req, res) => {
   const token = String(req.params.token);
-  if (!findValidToken("REDEFINICAO", token)) {
+  if (!(await findValidToken("REDEFINICAO", token))) {
     res.status(404).send(messagePage("Link inválido", "Este link de redefinição não existe, já foi usado ou expirou (vale por 2 horas). Peça um novo."));
     return;
   }
   res.send(resetPage({ token }));
 });
 
-app.post("/redefinir/:token", (req, res) => {
+app.post("/redefinir/:token", async (req, res) => {
   const token = String(req.params.token);
   const { password } = req.body as { password?: string };
-  const result = completePasswordReset(token, password ?? "");
+  const result = await completePasswordReset(token, password ?? "");
   if (!result.ok) {
     res.status(400).send(resetPage({ token, error: result.error }));
     return;
   }
-  audit("senha_redefinida", { userId: result.userId, ip: clientIp(req) });
+  await audit("senha_redefinida", { userId: result.userId, ip: clientIp(req) });
   res.send(messagePage("Senha alterada", "Sua nova senha já vale. Entre novamente."));
 });
 
@@ -313,13 +312,13 @@ app.post("/logout", (req, res) => {
   req.session.destroy(() => res.redirect("/login"));
 });
 
-app.get("/", requireAuth, (_req, res) => {
+app.get("/", requireAuth, async (_req, res) => {
   const user = res.locals.user;
   if (user.is_platform_admin) {
     res.redirect("/admin");
     return;
   }
-  const memberships = listMembershipsForUser(user.id);
+  const memberships = await listMembershipsForUser(user.id);
   if (memberships.length === 0) {
     res.send(noCompanyPage());
     return;
@@ -331,107 +330,112 @@ app.get("/", requireAuth, (_req, res) => {
   res.redirect("/empresas");
 });
 
-app.get("/empresas", requireAuth, (_req, res) => {
-  const memberships = listMembershipsForUser(res.locals.user.id);
+app.get("/empresas", requireAuth, async (_req, res) => {
+  const memberships = await listMembershipsForUser(res.locals.user.id);
   res.send(companySelectorPage(memberships));
 });
 
 // --- Painel da Hub Action: empresas, usuários, planos manuais, conexões -----
 
-function renderAdmin(res: express.Response, extra: { generatedLink?: { label: string; url: string }; notice?: string; error?: string } = {}): void {
-  const companies = listCompaniesForAdmin();
-  const statuses = new Map(companies.map((c) => [c.id, buildConnectionStatusReport(c.id)]));
-  const usersByCompany = new Map(companies.map((c) => [c.id, listCompanyUsers(c.id)]));
-  const invitesByCompany = new Map(companies.map((c) => [c.id, listPendingInvites(c.id)]));
+async function renderAdmin(
+  res: express.Response,
+  extra: { generatedLink?: { label: string; url: string }; notice?: string; error?: string } = {}
+): Promise<void> {
+  const companies = await listCompaniesForAdmin();
+  const statuses = new Map(await Promise.all(companies.map(async (c) => [c.id, await buildConnectionStatusReport(c.id)] as const)));
+  const usersByCompany = new Map(await Promise.all(companies.map(async (c) => [c.id, await listCompanyUsers(c.id)] as const)));
+  const invitesByCompany = new Map(await Promise.all(companies.map(async (c) => [c.id, await listPendingInvites(c.id)] as const)));
   res.send(adminPage({ currentUserId: res.locals.user.id, companies, statuses, usersByCompany, invitesByCompany, ...extra }));
 }
 
-app.get("/admin", requirePlatformAdmin, (_req, res) => renderAdmin(res));
+app.get("/admin", requirePlatformAdmin, async (_req, res) => renderAdmin(res));
 
-app.get("/admin/log", requirePlatformAdmin, (_req, res) => {
-  res.send(auditLogPage(listAuditEntries(200), "/admin"));
+app.get("/admin/log", requirePlatformAdmin, async (_req, res) => {
+  res.send(auditLogPage(await listAuditEntries(200), "/admin"));
 });
 
-app.post("/admin/empresas", requirePlatformAdmin, (req, res) => {
+app.post("/admin/empresas", requirePlatformAdmin, async (req, res) => {
   const { name } = req.body as { name?: string };
   if (!name || !name.trim()) {
-    renderAdmin(res, { error: "Informe o nome da empresa." });
+    await renderAdmin(res, { error: "Informe o nome da empresa." });
     return;
   }
-  const company = createCompany(name);
-  audit("empresa_criada", { companyId: company.id, userId: res.locals.user.id, detail: company.name, ip: clientIp(req) });
-  renderAdmin(res, { notice: `Empresa "${company.name}" criada em modo demonstração. Gere um convite de administrador para o cliente entrar.` });
+  const company = await createCompany(name);
+  await audit("empresa_criada", { companyId: company.id, userId: res.locals.user.id, detail: company.name, ip: clientIp(req) });
+  await renderAdmin(res, { notice: `Empresa "${company.name}" criada em modo demonstração. Gere um convite de administrador para o cliente entrar.` });
 });
 
-app.post("/admin/empresas/:companyId/plano", requirePlatformAdmin, (req, res) => {
+app.post("/admin/empresas/:companyId/plano", requirePlatformAdmin, async (req, res) => {
   const companyId = Number(req.params.companyId);
-  const company = findCompanyById(companyId);
+  const company = await findCompanyById(companyId);
   if (!company) {
-    renderAdmin(res, { error: "Empresa não encontrada." });
+    await renderAdmin(res, { error: "Empresa não encontrada." });
     return;
   }
   const body = req.body as { plan?: string; suspended?: string; plan_notes?: string };
   const plan: CompanyPlan = body.plan === "PILOTO" || body.plan === "ATIVO" ? body.plan : "DEMONSTRACAO";
   const suspended = body.suspended === "1";
-  updateCompanyPlan(companyId, plan, suspended, body.plan_notes?.trim() || null);
-  audit("plano_alterado", {
+  await updateCompanyPlan(companyId, plan, suspended, body.plan_notes?.trim() || null);
+  await audit("plano_alterado", {
     companyId,
     userId: res.locals.user.id,
     detail: `${plan}${suspended ? " (suspensa)" : ""}`,
     ip: clientIp(req),
   });
-  renderAdmin(res, { notice: `Plano de "${company.name}" atualizado.` });
+  await renderAdmin(res, { notice: `Plano de "${company.name}" atualizado.` });
 });
 
-app.post("/admin/empresas/:companyId/convites", requirePlatformAdmin, (req, res) => {
+app.post("/admin/empresas/:companyId/convites", requirePlatformAdmin, async (req, res) => {
   const companyId = Number(req.params.companyId);
-  const company = findCompanyById(companyId);
+  const company = await findCompanyById(companyId);
   const { email, role } = req.body as { email?: string; role?: string };
   if (!company || !email || !email.includes("@")) {
-    renderAdmin(res, { error: "Empresa ou e-mail inválido." });
+    await renderAdmin(res, { error: "Empresa ou e-mail inválido." });
     return;
   }
   const inviteRole: Role = role === "COMPANY_ADMIN" ? "COMPANY_ADMIN" : "AGENT";
-  const token = createInvite(companyId, email, inviteRole, res.locals.user.id);
-  audit("convite_criado", { companyId, userId: res.locals.user.id, detail: `${email} (${inviteRole})`, ip: clientIp(req) });
-  renderAdmin(res, {
+  const token = await createInvite(companyId, email, inviteRole, res.locals.user.id);
+  await audit("convite_criado", { companyId, userId: res.locals.user.id, detail: `${email} (${inviteRole})`, ip: clientIp(req) });
+  await renderAdmin(res, {
     generatedLink: { label: `Convite para ${email} — ${company.name}`, url: `${publicBaseUrl(req)}/convite/${token}` },
   });
 });
 
-app.post("/admin/usuarios/:userId/redefinir", requirePlatformAdmin, (req, res) => {
-  const user = findUserById(Number(req.params.userId));
+app.post("/admin/usuarios/:userId/redefinir", requirePlatformAdmin, async (req, res) => {
+  const user = await findUserById(Number(req.params.userId));
   if (!user) {
-    renderAdmin(res, { error: "Usuário não encontrado." });
+    await renderAdmin(res, { error: "Usuário não encontrado." });
     return;
   }
-  const token = createPasswordReset(user.id, user.email, res.locals.user.id);
-  audit("redefinicao_gerada", { userId: user.id, detail: `por Hub Action (${res.locals.user.email})`, ip: clientIp(req) });
-  renderAdmin(res, { generatedLink: { label: `Nova senha para ${user.name} (${user.email}) — vale 2 horas`, url: `${publicBaseUrl(req)}/redefinir/${token}` } });
+  const token = await createPasswordReset(user.id, user.email, res.locals.user.id);
+  await audit("redefinicao_gerada", { userId: user.id, detail: `por Hub Action (${res.locals.user.email})`, ip: clientIp(req) });
+  await renderAdmin(res, {
+    generatedLink: { label: `Nova senha para ${user.name} (${user.email}) — vale 2 horas`, url: `${publicBaseUrl(req)}/redefinir/${token}` },
+  });
 });
 
-app.post("/admin/usuarios/:userId/ativo", requirePlatformAdmin, (req, res) => {
-  const user = findUserById(Number(req.params.userId));
+app.post("/admin/usuarios/:userId/ativo", requirePlatformAdmin, async (req, res) => {
+  const user = await findUserById(Number(req.params.userId));
   if (!user || user.id === res.locals.user.id) {
-    renderAdmin(res, { error: "Usuário inválido." });
+    await renderAdmin(res, { error: "Usuário inválido." });
     return;
   }
   const active = (req.body as { active?: string }).active === "1";
-  setUserActive(user.id, active);
-  audit(active ? "usuario_reativado" : "usuario_desativado", { userId: user.id, detail: `por Hub Action (${res.locals.user.email})`, ip: clientIp(req) });
-  renderAdmin(res, { notice: `${user.name} ${active ? "reativado" : "desativado"}.` });
+  await setUserActive(user.id, active);
+  await audit(active ? "usuario_reativado" : "usuario_desativado", { userId: user.id, detail: `por Hub Action (${res.locals.user.email})`, ip: clientIp(req) });
+  await renderAdmin(res, { notice: `${user.name} ${active ? "reativado" : "desativado"}.` });
 });
 
 // --- Conversas (caixa de entrada + simulador exclusivo de desenvolvimento) --
 
-app.get("/empresa/:companyId/conversas", requireCompanyAccess, (_req, res) => {
-  const items = listConversations(res.locals.company.id);
+app.get("/empresa/:companyId/conversas", requireCompanyAccess, async (_req, res) => {
+  const items = await listConversations(res.locals.company.id);
   res.send(
     inboxPage({ company: res.locals.company, user: res.locals.user, role: res.locals.membership.role, items, isDev: IS_DEV })
   );
 });
 
-app.post("/empresa/:companyId/conversas/nova", requireCompanyAccess, (req, res) => {
+app.post("/empresa/:companyId/conversas/nova", requireCompanyAccess, async (req, res) => {
   if (!IS_DEV) {
     res.status(404).send("Não encontrado.");
     return;
@@ -442,15 +446,15 @@ app.post("/empresa/:companyId/conversas/nova", requireCompanyAccess, (req, res) 
     return;
   }
   const company = res.locals.company;
-  const contact = findOrCreateContact(company.id, name, phone);
-  const conv = createConversation(company.id, contact.id, mode === "MANUAL" ? "MANUAL" : ("AUTOMATICO" as ConversationMode));
+  const contact = await findOrCreateContact(company.id, name, phone);
+  const conv = await createConversation(company.id, contact.id, mode === "MANUAL" ? "MANUAL" : ("AUTOMATICO" as ConversationMode));
   res.redirect(`/empresa/${company.id}/conversas/${conv.id}`);
 });
 
-function loadConversationOrNotFound(req: express.Request, res: express.Response) {
+async function loadConversationOrNotFound(req: express.Request, res: express.Response): Promise<Conversation | undefined> {
   const conversationId = Number(req.params.conversationId);
   const company = res.locals.company;
-  const conv = Number.isInteger(conversationId) ? getConversation(company.id, conversationId) : undefined;
+  const conv = Number.isInteger(conversationId) ? await getConversation(company.id, conversationId) : undefined;
   if (!conv) {
     res.status(404).send("Conversa não encontrada.");
     return undefined;
@@ -458,18 +462,18 @@ function loadConversationOrNotFound(req: express.Request, res: express.Response)
   return conv;
 }
 
-app.get("/empresa/:companyId/conversas/:conversationId", requireCompanyAccess, (req, res) => {
-  const conv = loadConversationOrNotFound(req, res);
+app.get("/empresa/:companyId/conversas/:conversationId", requireCompanyAccess, async (req, res) => {
+  const conv = await loadConversationOrNotFound(req, res);
   if (!conv) return;
   const company = res.locals.company;
-  const contact = getContact(company.id, conv.contact_id);
+  const contact = await getContact(company.id, conv.contact_id);
   if (!contact) {
     res.status(404).send("Contato não encontrado.");
     return;
   }
   const hours = parseBusinessHours(company.business_hours);
-  const wait = summarizeWait(conv.id, company.timezone, hours);
-  const assignedUser = conv.assigned_user_id ? findUserById(conv.assigned_user_id) : undefined;
+  const wait = await summarizeWait(conv.id, company.timezone, hours);
+  const assignedUser = conv.assigned_user_id ? await findUserById(conv.assigned_user_id) : undefined;
   res.send(
     conversationDetailPage({
       company,
@@ -477,31 +481,31 @@ app.get("/empresa/:companyId/conversas/:conversationId", requireCompanyAccess, (
       role: res.locals.membership.role,
       conversation: conv,
       contact,
-      messages: listMessages(conv.id),
+      messages: await listMessages(conv.id),
       wait,
-      episodes: listWaitEpisodes(conv.id),
+      episodes: await listWaitEpisodes(conv.id),
       assignedUserName: assignedUser?.name ?? null,
       isDev: IS_DEV,
     })
   );
 });
 
-app.post("/empresa/:companyId/conversas/:conversationId/assumir", requireCompanyAccess, (req, res) => {
-  const conv = loadConversationOrNotFound(req, res);
+app.post("/empresa/:companyId/conversas/:conversationId/assumir", requireCompanyAccess, async (req, res) => {
+  const conv = await loadConversationOrNotFound(req, res);
   if (!conv) return;
-  assumeConversation(res.locals.company.id, conv.id, res.locals.user.id);
+  await assumeConversation(res.locals.company.id, conv.id, res.locals.user.id);
   res.redirect(`/empresa/${res.locals.company.id}/conversas/${conv.id}`);
 });
 
-app.post("/empresa/:companyId/conversas/:conversationId/encerrar", requireCompanyAccess, (req, res) => {
-  const conv = loadConversationOrNotFound(req, res);
+app.post("/empresa/:companyId/conversas/:conversationId/encerrar", requireCompanyAccess, async (req, res) => {
+  const conv = await loadConversationOrNotFound(req, res);
   if (!conv) return;
-  closeConversation(res.locals.company.id, conv.id);
+  await closeConversation(res.locals.company.id, conv.id);
   res.redirect(`/empresa/${res.locals.company.id}/conversas/${conv.id}`);
 });
 
 app.post("/empresa/:companyId/conversas/:conversationId/responder", requireCompanyAccess, async (req, res) => {
-  const conv = loadConversationOrNotFound(req, res);
+  const conv = await loadConversationOrNotFound(req, res);
   if (!conv) return;
   const company = res.locals.company;
   const { body, simular_falha } = req.body as { body?: string; simular_falha?: string };
@@ -515,9 +519,9 @@ app.post("/empresa/:companyId/conversas/:conversationId/responder", requireCompa
   if (conv.channel === "WHATSAPP_OFICIAL") {
     // Canal real: a resposta é de fato enviada pela Cloud API. O checkbox de
     // "simular falha" (dev) não se aplica aqui — a falha, se houver, é real.
-    const connections = listConnectionsForCompany(company.id);
+    const connections = await listConnectionsForCompany(company.id);
     const connection = connections.find((c) => c.active);
-    const contact = getContact(company.id, conv.contact_id);
+    const contact = await getContact(company.id, conv.contact_id);
     if (!connection || !contact) {
       sendStatus = "FALHOU";
       console.error(`[whatsapp] envio recusado: conexão ou contato ausente (empresa ${company.id}, conversa ${conv.id})`);
@@ -535,7 +539,7 @@ app.post("/empresa/:companyId/conversas/:conversationId/responder", requireCompa
   // O atendente autenticado (author_user_id) e o resultado do envio (send_status)
   // já identificam quem respondeu e se foi aceito pela Meta. waMessageId liga essa
   // mensagem aos eventos de status (ENTREGUE/LIDA) que chegam depois pelo webhook.
-  addMessage({
+  await addMessage({
     companyId: company.id,
     conversationId: conv.id,
     authorType: "HUMANO",
@@ -547,28 +551,28 @@ app.post("/empresa/:companyId/conversas/:conversationId/responder", requireCompa
   res.redirect(`/empresa/${company.id}/conversas/${conv.id}`);
 });
 
-app.post("/empresa/:companyId/conversas/:conversationId/simular/cliente", requireCompanyAccess, (req, res) => {
+app.post("/empresa/:companyId/conversas/:conversationId/simular/cliente", requireCompanyAccess, async (req, res) => {
   if (!IS_DEV) {
     res.status(404).send("Não encontrado.");
     return;
   }
-  const conv = loadConversationOrNotFound(req, res);
+  const conv = await loadConversationOrNotFound(req, res);
   if (!conv) return;
   const { body } = req.body as { body?: string };
   if (body && body.trim()) {
-    addMessage({ companyId: res.locals.company.id, conversationId: conv.id, authorType: "CLIENTE", body });
+    await addMessage({ companyId: res.locals.company.id, conversationId: conv.id, authorType: "CLIENTE", body });
   }
   res.redirect(`/empresa/${res.locals.company.id}/conversas/${conv.id}`);
 });
 
-app.post("/empresa/:companyId/conversas/:conversationId/simular/pedir-humano", requireCompanyAccess, (req, res) => {
+app.post("/empresa/:companyId/conversas/:conversationId/simular/pedir-humano", requireCompanyAccess, async (req, res) => {
   if (!IS_DEV) {
     res.status(404).send("Não encontrado.");
     return;
   }
-  const conv = loadConversationOrNotFound(req, res);
+  const conv = await loadConversationOrNotFound(req, res);
   if (!conv) return;
-  addMessage({
+  await addMessage({
     companyId: res.locals.company.id,
     conversationId: conv.id,
     authorType: "CLIENTE",
@@ -586,37 +590,37 @@ export const ROBO_MENU_TEXTO =
 export const ROBO_TRANSFERENCIA_TEXTO =
   'Por favor aguarde, estou chamando um atendente humano para te ajudar!!\nAtenção: pode demorar alguns minutos.';
 
-app.post("/empresa/:companyId/conversas/:conversationId/simular/robo/menu", requireCompanyAccess, (req, res) => {
+app.post("/empresa/:companyId/conversas/:conversationId/simular/robo/menu", requireCompanyAccess, async (req, res) => {
   if (!IS_DEV) {
     res.status(404).send("Não encontrado.");
     return;
   }
-  const conv = loadConversationOrNotFound(req, res);
+  const conv = await loadConversationOrNotFound(req, res);
   if (!conv) return;
-  addMessage({ companyId: res.locals.company.id, conversationId: conv.id, authorType: "ROBO", body: ROBO_MENU_TEXTO });
+  await addMessage({ companyId: res.locals.company.id, conversationId: conv.id, authorType: "ROBO", body: ROBO_MENU_TEXTO });
   res.redirect(`/empresa/${res.locals.company.id}/conversas/${conv.id}`);
 });
 
-app.post("/empresa/:companyId/conversas/:conversationId/simular/robo/transferencia", requireCompanyAccess, (req, res) => {
+app.post("/empresa/:companyId/conversas/:conversationId/simular/robo/transferencia", requireCompanyAccess, async (req, res) => {
   if (!IS_DEV) {
     res.status(404).send("Não encontrado.");
     return;
   }
-  const conv = loadConversationOrNotFound(req, res);
+  const conv = await loadConversationOrNotFound(req, res);
   if (!conv) return;
-  addMessage({ companyId: res.locals.company.id, conversationId: conv.id, authorType: "ROBO", body: ROBO_TRANSFERENCIA_TEXTO });
+  await addMessage({ companyId: res.locals.company.id, conversationId: conv.id, authorType: "ROBO", body: ROBO_TRANSFERENCIA_TEXTO });
   res.redirect(`/empresa/${res.locals.company.id}/conversas/${conv.id}`);
 });
 
-app.post("/empresa/:companyId/conversas/:conversationId/simular/robo", requireCompanyAccess, (req, res) => {
+app.post("/empresa/:companyId/conversas/:conversationId/simular/robo", requireCompanyAccess, async (req, res) => {
   if (!IS_DEV) {
     res.status(404).send("Não encontrado.");
     return;
   }
-  const conv = loadConversationOrNotFound(req, res);
+  const conv = await loadConversationOrNotFound(req, res);
   if (!conv) return;
   const { body } = req.body as { body?: string };
-  addMessage({
+  await addMessage({
     companyId: res.locals.company.id,
     conversationId: conv.id,
     authorType: "ROBO",
@@ -627,13 +631,20 @@ app.post("/empresa/:companyId/conversas/:conversationId/simular/robo", requireCo
 
 // --- Configurações: fuso horário e expediente da empresa --------------------
 
+type TeamExtra = { generatedLink?: { label: string; url: string }; notice?: string; error?: string };
+
 /** Dados da equipe para a tela de Configurações (só admin da empresa). */
-function teamData(res: express.Response, extra: { generatedLink?: { label: string; url: string }; notice?: string; error?: string } = {}) {
+async function teamData(res: express.Response, extra: TeamExtra = {}) {
   const company = res.locals.company;
-  return { users: listCompanyUsers(company.id), invites: listPendingInvites(company.id), currentUserId: res.locals.user.id as number, ...extra };
+  return {
+    users: await listCompanyUsers(company.id),
+    invites: await listPendingInvites(company.id),
+    currentUserId: res.locals.user.id as number,
+    ...extra,
+  };
 }
 
-function renderSettings(res: express.Response, teamExtra: { generatedLink?: { label: string; url: string }; notice?: string; error?: string } = {}): void {
+async function renderSettings(res: express.Response, teamExtra: TeamExtra = {}): Promise<void> {
   const company = res.locals.company;
   const canEdit = res.locals.membership.role === "COMPANY_ADMIN";
   res.send(
@@ -643,16 +654,16 @@ function renderSettings(res: express.Response, teamExtra: { generatedLink?: { la
       role: res.locals.membership.role,
       canEdit,
       hours: parseBusinessHours(company.business_hours),
-      whatsapp: canEdit ? buildConnectionStatusReport(company.id) : undefined,
-      team: canEdit ? teamData(res, teamExtra) : undefined,
+      whatsapp: canEdit ? await buildConnectionStatusReport(company.id) : undefined,
+      team: canEdit ? await teamData(res, teamExtra) : undefined,
     })
   );
 }
 
-app.get("/empresa/:companyId/configuracoes", requireCompanyAccess, (_req, res) => renderSettings(res));
+app.get("/empresa/:companyId/configuracoes", requireCompanyAccess, async (_req, res) => renderSettings(res));
 
-function requireCompanyAdmin(req: express.Request, res: express.Response, next: express.NextFunction): void {
-  requireCompanyAccess(req, res, () => {
+async function requireCompanyAdmin(req: express.Request, res: express.Response, next: express.NextFunction): Promise<void> {
+  await requireCompanyAccess(req, res, () => {
     if (res.locals.membership.role !== "COMPANY_ADMIN") {
       res.status(403).send("Apenas o administrador da empresa pode fazer isso.");
       return;
@@ -661,47 +672,47 @@ function requireCompanyAdmin(req: express.Request, res: express.Response, next: 
   });
 }
 
-app.post("/empresa/:companyId/configuracoes/equipe/convites", requireCompanyAdmin, (req, res) => {
+app.post("/empresa/:companyId/configuracoes/equipe/convites", requireCompanyAdmin, async (req, res) => {
   const company = res.locals.company;
   const { email, role } = req.body as { email?: string; role?: string };
   if (!email || !email.includes("@")) {
-    renderSettings(res, { error: "Informe um e-mail válido." });
+    await renderSettings(res, { error: "Informe um e-mail válido." });
     return;
   }
   const inviteRole: Role = role === "COMPANY_ADMIN" ? "COMPANY_ADMIN" : "AGENT";
-  const token = createInvite(company.id, email, inviteRole, res.locals.user.id);
-  audit("convite_criado", { companyId: company.id, userId: res.locals.user.id, detail: `${email} (${inviteRole})`, ip: clientIp(req) });
-  renderSettings(res, { generatedLink: { label: `Convite para ${email}`, url: `${publicBaseUrl(req)}/convite/${token}` } });
+  const token = await createInvite(company.id, email, inviteRole, res.locals.user.id);
+  await audit("convite_criado", { companyId: company.id, userId: res.locals.user.id, detail: `${email} (${inviteRole})`, ip: clientIp(req) });
+  await renderSettings(res, { generatedLink: { label: `Convite para ${email}`, url: `${publicBaseUrl(req)}/convite/${token}` } });
 });
 
-app.post("/empresa/:companyId/configuracoes/equipe/:userId/redefinir", requireCompanyAdmin, (req, res) => {
+app.post("/empresa/:companyId/configuracoes/equipe/:userId/redefinir", requireCompanyAdmin, async (req, res) => {
   const company = res.locals.company;
-  const target = listCompanyUsers(company.id).find((u) => u.user_id === Number(req.params.userId));
+  const target = (await listCompanyUsers(company.id)).find((u) => u.user_id === Number(req.params.userId));
   if (!target) {
-    renderSettings(res, { error: "Usuário não pertence a esta empresa." });
+    await renderSettings(res, { error: "Usuário não pertence a esta empresa." });
     return;
   }
-  const token = createPasswordReset(target.user_id, target.email, res.locals.user.id);
-  audit("redefinicao_gerada", { companyId: company.id, userId: target.user_id, detail: `por ${res.locals.user.email}`, ip: clientIp(req) });
-  renderSettings(res, { generatedLink: { label: `Nova senha para ${target.name} — vale 2 horas`, url: `${publicBaseUrl(req)}/redefinir/${token}` } });
+  const token = await createPasswordReset(target.user_id, target.email, res.locals.user.id);
+  await audit("redefinicao_gerada", { companyId: company.id, userId: target.user_id, detail: `por ${res.locals.user.email}`, ip: clientIp(req) });
+  await renderSettings(res, { generatedLink: { label: `Nova senha para ${target.name} — vale 2 horas`, url: `${publicBaseUrl(req)}/redefinir/${token}` } });
 });
 
-app.post("/empresa/:companyId/configuracoes/equipe/:userId/ativo", requireCompanyAdmin, (req, res) => {
+app.post("/empresa/:companyId/configuracoes/equipe/:userId/ativo", requireCompanyAdmin, async (req, res) => {
   const company = res.locals.company;
-  const target = listCompanyUsers(company.id).find((u) => u.user_id === Number(req.params.userId));
+  const target = (await listCompanyUsers(company.id)).find((u) => u.user_id === Number(req.params.userId));
   if (!target || target.user_id === res.locals.user.id) {
-    renderSettings(res, { error: "Usuário inválido." });
+    await renderSettings(res, { error: "Usuário inválido." });
     return;
   }
   const active = (req.body as { active?: string }).active === "1";
-  setUserActive(target.user_id, active);
-  audit(active ? "usuario_reativado" : "usuario_desativado", { companyId: company.id, userId: target.user_id, detail: `por ${res.locals.user.email}`, ip: clientIp(req) });
-  renderSettings(res, { notice: `${target.name} ${active ? "reativado" : "desativado"}.` });
+  await setUserActive(target.user_id, active);
+  await audit(active ? "usuario_reativado" : "usuario_desativado", { companyId: company.id, userId: target.user_id, detail: `por ${res.locals.user.email}`, ip: clientIp(req) });
+  await renderSettings(res, { notice: `${target.name} ${active ? "reativado" : "desativado"}.` });
 });
 
 const WEEKDAY_KEYS: WeekdayKey[] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
-app.post("/empresa/:companyId/configuracoes", requireCompanyAccess, (req, res) => {
+app.post("/empresa/:companyId/configuracoes", requireCompanyAccess, async (req, res) => {
   const company = res.locals.company;
   if (res.locals.membership.role !== "COMPANY_ADMIN") {
     res.status(403).send("Apenas o administrador da empresa pode editar.");
@@ -734,15 +745,15 @@ app.post("/empresa/:companyId/configuracoes", requireCompanyAccess, (req, res) =
         role: res.locals.membership.role,
         canEdit: true,
         hours,
-        whatsapp: buildConnectionStatusReport(company.id),
-        team: teamData(res),
+        whatsapp: await buildConnectionStatusReport(company.id),
+        team: await teamData(res),
         error,
       })
     );
     return;
   }
 
-  updateCompanySettings(company.id, timezone, JSON.stringify(hours));
+  await updateCompanySettings(company.id, timezone, JSON.stringify(hours));
   res.send(
     settingsPage({
       company: { ...company, timezone, business_hours: JSON.stringify(hours) },
@@ -750,8 +761,8 @@ app.post("/empresa/:companyId/configuracoes", requireCompanyAccess, (req, res) =
       role: res.locals.membership.role,
       canEdit: true,
       hours,
-      whatsapp: buildConnectionStatusReport(company.id),
-      team: teamData(res),
+      whatsapp: await buildConnectionStatusReport(company.id),
+      team: await teamData(res),
       success: "Configurações salvas.",
     })
   );
@@ -763,14 +774,14 @@ app.post("/empresa/:companyId/configuracoes/whatsapp/verificar", requireCompanyA
     res.status(403).send("Apenas o administrador da empresa pode verificar a conexão.");
     return;
   }
-  const connection = listConnectionsForCompany(company.id).find((c) => c.active === 1);
+  const connection = (await listConnectionsForCompany(company.id)).find((c) => c.active === 1);
   let whatsappVerifySuccess: string | undefined;
   let whatsappVerifyError: string | undefined;
   if (!connection) {
     whatsappVerifyError = "Nenhum número associado a esta empresa para verificar.";
   } else {
     const result = await verifyPhoneNumberConnection(connection.phone_number_id);
-    recordVerification(connection.phone_number_id, result);
+    await recordVerification(connection.phone_number_id, result);
     if (result.ok) whatsappVerifySuccess = result.detail;
     else whatsappVerifyError = result.detail;
   }
@@ -782,8 +793,8 @@ app.post("/empresa/:companyId/configuracoes/whatsapp/verificar", requireCompanyA
       role: res.locals.membership.role,
       canEdit: true,
       hours: parseBusinessHours(company.business_hours),
-      whatsapp: buildConnectionStatusReport(company.id),
-      team: teamData(res),
+      whatsapp: await buildConnectionStatusReport(company.id),
+      team: await teamData(res),
       whatsappVerifySuccess,
       whatsappVerifyError,
     })
@@ -792,20 +803,23 @@ app.post("/empresa/:companyId/configuracoes/whatsapp/verificar", requireCompanyA
 
 // --- CRM: funil configurável, separado de contato --------------------------
 
-app.get("/empresa/:companyId/crm", requireCompanyAccess, (_req, res) => {
+async function renderCrm(res: express.Response, error?: string): Promise<void> {
   const company = res.locals.company;
-  ensureDefaultPipelineStages(company.id);
+  await ensureDefaultPipelineStages(company.id);
   res.send(
     crmPage({
       company,
       user: res.locals.user,
       role: res.locals.membership.role,
-      stages: listStages(company.id),
-      byStage: listOpportunitiesByStage(company.id),
-      members: listCompanyMembers(company.id),
+      stages: await listStages(company.id),
+      byStage: await listOpportunitiesByStage(company.id),
+      members: await listCompanyMembers(company.id),
+      error,
     })
   );
-});
+}
+
+app.get("/empresa/:companyId/crm", requireCompanyAccess, async (_req, res) => renderCrm(res));
 
 /** "YYYY-MM-DDTHH:MM" digitado no formulário é interpretado no fuso da empresa (não no do servidor). */
 function parseScheduledAt(value: string | undefined, timeZone: string): string | null {
@@ -819,15 +833,15 @@ function parseReais(value: string | undefined): number {
   return Number.isFinite(n) && n >= 0 ? Math.round(n * 100) : 0;
 }
 
-app.post("/empresa/:companyId/crm/oportunidades", requireCompanyAccess, (req, res) => {
+app.post("/empresa/:companyId/crm/oportunidades", requireCompanyAccess, async (req, res) => {
   const company = res.locals.company;
   const body = req.body as Record<string, string | undefined>;
   if (!body.contact_name || !body.contact_phone || !body.title) {
     res.status(400).send("Contato e título são obrigatórios.");
     return;
   }
-  const contact = findOrCreateContact(company.id, body.contact_name, body.contact_phone);
-  createOpportunity({
+  const contact = await findOrCreateContact(company.id, body.contact_name, body.contact_phone);
+  await createOpportunity({
     companyId: company.id,
     contactId: contact.id,
     title: body.title,
@@ -838,31 +852,22 @@ app.post("/empresa/:companyId/crm/oportunidades", requireCompanyAccess, (req, re
   res.redirect(`/empresa/${company.id}/crm`);
 });
 
-app.post("/empresa/:companyId/crm/oportunidades/:opportunityId/mover", requireCompanyAccess, (req, res) => {
+app.post("/empresa/:companyId/crm/oportunidades/:opportunityId/mover", requireCompanyAccess, async (req, res) => {
   const company = res.locals.company;
   const body = req.body as Record<string, string | undefined>;
-  const result = moveOpportunity(company.id, Number(req.params.opportunityId), Number(body.stage_id), body.lost_reason);
+  const result = await moveOpportunity(company.id, Number(req.params.opportunityId), Number(body.stage_id), body.lost_reason);
   if (!result.ok) {
-    res.status(400).send(
-      crmPage({
-        company,
-        user: res.locals.user,
-        role: res.locals.membership.role,
-        stages: listStages(company.id),
-        byStage: listOpportunitiesByStage(company.id),
-        members: listCompanyMembers(company.id),
-        error: result.error,
-      })
-    );
+    res.status(400);
+    await renderCrm(res, result.error);
     return;
   }
   res.redirect(`/empresa/${company.id}/crm`);
 });
 
-app.post("/empresa/:companyId/crm/oportunidades/:opportunityId/editar", requireCompanyAccess, (req, res) => {
+app.post("/empresa/:companyId/crm/oportunidades/:opportunityId/editar", requireCompanyAccess, async (req, res) => {
   const company = res.locals.company;
   const body = req.body as Record<string, string | undefined>;
-  updateOpportunityDetails(company.id, Number(req.params.opportunityId), {
+  await updateOpportunityDetails(company.id, Number(req.params.opportunityId), {
     responsibleUserId: body.responsible_user_id ? Number(body.responsible_user_id) : null,
     valueCents: parseReais(body.value),
     scheduledAt: parseScheduledAt(body.scheduled_at, company.timezone),
@@ -870,40 +875,40 @@ app.post("/empresa/:companyId/crm/oportunidades/:opportunityId/editar", requireC
   res.redirect(`/empresa/${company.id}/crm`);
 });
 
-app.get("/empresa/:companyId/crm/etapas", requireCompanyAccess, (_req, res) => {
+app.get("/empresa/:companyId/crm/etapas", requireCompanyAccess, async (_req, res) => {
   const company = res.locals.company;
-  ensureDefaultPipelineStages(company.id);
-  res.send(crmStagesPage({ company, user: res.locals.user, role: res.locals.membership.role, stages: listStages(company.id) }));
+  await ensureDefaultPipelineStages(company.id);
+  res.send(crmStagesPage({ company, user: res.locals.user, role: res.locals.membership.role, stages: await listStages(company.id) }));
 });
 
-app.post("/empresa/:companyId/crm/etapas", requireCompanyAccess, (req, res) => {
+app.post("/empresa/:companyId/crm/etapas", requireCompanyAccess, async (req, res) => {
   const company = res.locals.company;
   const { name } = req.body as { name?: string };
-  if (name && name.trim()) addStage(company.id, name.trim());
+  if (name && name.trim()) await addStage(company.id, name.trim());
   res.redirect(`/empresa/${company.id}/crm/etapas`);
 });
 
-app.post("/empresa/:companyId/crm/etapas/:stageId/renomear", requireCompanyAccess, (req, res) => {
+app.post("/empresa/:companyId/crm/etapas/:stageId/renomear", requireCompanyAccess, async (req, res) => {
   const company = res.locals.company;
   const { name } = req.body as { name?: string };
-  if (name && name.trim()) renameStage(company.id, Number(req.params.stageId), name.trim());
+  if (name && name.trim()) await renameStage(company.id, Number(req.params.stageId), name.trim());
   res.redirect(`/empresa/${company.id}/crm/etapas`);
 });
 
-app.post("/empresa/:companyId/crm/etapas/:stageId/mover", requireCompanyAccess, (req, res) => {
+app.post("/empresa/:companyId/crm/etapas/:stageId/mover", requireCompanyAccess, async (req, res) => {
   const company = res.locals.company;
   const { direction } = req.body as { direction?: string };
-  reorderStage(company.id, Number(req.params.stageId), direction === "up" ? "up" : "down");
+  await reorderStage(company.id, Number(req.params.stageId), direction === "up" ? "up" : "down");
   res.redirect(`/empresa/${company.id}/crm/etapas`);
 });
 
-app.post("/empresa/:companyId/crm/etapas/:stageId/excluir", requireCompanyAccess, (req, res) => {
+app.post("/empresa/:companyId/crm/etapas/:stageId/excluir", requireCompanyAccess, async (req, res) => {
   const company = res.locals.company;
-  const result = deleteStage(company.id, Number(req.params.stageId));
+  const result = await deleteStage(company.id, Number(req.params.stageId));
   if (!result.ok) {
     res
       .status(400)
-      .send(crmStagesPage({ company, user: res.locals.user, role: res.locals.membership.role, stages: listStages(company.id), error: result.error }));
+      .send(crmStagesPage({ company, user: res.locals.user, role: res.locals.membership.role, stages: await listStages(company.id), error: result.error }));
     return;
   }
   res.redirect(`/empresa/${company.id}/crm/etapas`);
@@ -921,14 +926,14 @@ function daysAgoIsoDate(days: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-app.get("/empresa/:companyId/dashboard", requireCompanyAccess, (req, res) => {
+app.get("/empresa/:companyId/dashboard", requireCompanyAccess, async (req, res) => {
   const company = res.locals.company;
   const query = req.query as Record<string, string | undefined>;
   const from = query.de || daysAgoIsoDate(29);
   const to = query.ate || todayIsoDate();
   const attendantUserId = query.atendente ? Number(query.atendente) : null;
 
-  const data = computeDashboard(company.id, company.timezone, company.sla_first_response_minutes, {
+  const data = await computeDashboard(company.id, company.timezone, company.sla_first_response_minutes, {
     from,
     to,
     attendantUserId,
@@ -941,14 +946,14 @@ app.get("/empresa/:companyId/dashboard", requireCompanyAccess, (req, res) => {
       role: res.locals.membership.role,
       isDev: IS_DEV,
       canEditSla: res.locals.membership.role === "COMPANY_ADMIN",
-      members: listCompanyMembers(company.id),
+      members: await listCompanyMembers(company.id),
       filters: { from, to, attendantUserId },
       data,
     })
   );
 });
 
-app.post("/empresa/:companyId/dashboard/meta-sla", requireCompanyAccess, (req, res) => {
+app.post("/empresa/:companyId/dashboard/meta-sla", requireCompanyAccess, async (req, res) => {
   const company = res.locals.company;
   if (res.locals.membership.role !== "COMPANY_ADMIN") {
     res.status(403).send("Apenas o administrador da empresa pode editar a meta.");
@@ -956,7 +961,7 @@ app.post("/empresa/:companyId/dashboard/meta-sla", requireCompanyAccess, (req, r
   }
   const minutos = Number((req.body as { minutos?: string }).minutos);
   if (Number.isFinite(minutos) && minutos > 0) {
-    updateSlaTarget(company.id, Math.round(minutos));
+    await updateSlaTarget(company.id, Math.round(minutos));
   }
   res.redirect(`/empresa/${company.id}/dashboard`);
 });
@@ -988,6 +993,20 @@ app.get("/empresa/:companyId/:page", requireCompanyAccess, (req, res) => {
   );
 });
 
-app.listen(PORT, () => {
-  console.log(`HUB ACTION - CRM WhatsApp rodando em http://localhost:${PORT}`);
+// Erro não tratado em rota async: nunca vaza stack trace para o cliente.
+app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error("[erro não tratado]", err);
+  if (!res.headersSent) res.status(500).send("Erro interno. Tente novamente.");
+});
+
+async function main(): Promise<void> {
+  await runMigrations();
+  app.listen(PORT, () => {
+    console.log(`HUB ACTION - CRM WhatsApp rodando em http://localhost:${PORT} (banco: ${db.dialect})`);
+  });
+}
+
+main().catch((err) => {
+  console.error("Falha ao iniciar:", err);
+  process.exit(1);
 });

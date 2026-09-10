@@ -50,14 +50,12 @@ export interface WhatsappConnection {
   last_verified_detail: string | null;
 }
 
-export function findConnectionByPhoneNumberId(phoneNumberId: string): WhatsappConnection | undefined {
-  return db
-    .prepare("SELECT * FROM whatsapp_connections WHERE phone_number_id = ? AND active = 1")
-    .get(phoneNumberId) as WhatsappConnection | undefined;
+export function findConnectionByPhoneNumberId(phoneNumberId: string): Promise<WhatsappConnection | undefined> {
+  return db.get<WhatsappConnection>("SELECT * FROM whatsapp_connections WHERE phone_number_id = ? AND active = 1", phoneNumberId);
 }
 
-export function listConnectionsForCompany(companyId: number): WhatsappConnection[] {
-  return db.prepare("SELECT * FROM whatsapp_connections WHERE company_id = ?").all(companyId) as WhatsappConnection[];
+export function listConnectionsForCompany(companyId: number): Promise<WhatsappConnection[]> {
+  return db.all<WhatsappConnection>("SELECT * FROM whatsapp_connections WHERE company_id = ?", companyId);
 }
 
 /**
@@ -65,25 +63,34 @@ export function listConnectionsForCompany(companyId: number): WhatsappConnection
  * administrativo — ver CONEXAO_WHATSAPP.md. `environment` é sempre declarado
  * explicitamente por quem conecta (nunca adivinhado pelo formato do número).
  */
-export function upsertConnection(
+export async function upsertConnection(
   companyId: number,
   phoneNumberId: string,
   wabaId: string | null,
   displayPhoneNumber: string | null,
   environment: WhatsappEnvironment = "TESTE"
-): void {
-  const existing = db.prepare("SELECT id FROM whatsapp_connections WHERE phone_number_id = ?").get(phoneNumberId) as
-    | { id: number }
-    | undefined;
+): Promise<void> {
+  const existing = await db.get<{ id: number }>("SELECT id FROM whatsapp_connections WHERE phone_number_id = ?", phoneNumberId);
   if (existing) {
-    db.prepare(
-      "UPDATE whatsapp_connections SET company_id = ?, waba_id = ?, display_phone_number = ?, environment = ?, active = 1 WHERE id = ?"
-    ).run(companyId, wabaId, displayPhoneNumber, environment, existing.id);
+    await db.run(
+      "UPDATE whatsapp_connections SET company_id = ?, waba_id = ?, display_phone_number = ?, environment = ?, active = 1 WHERE id = ?",
+      companyId,
+      wabaId,
+      displayPhoneNumber,
+      environment,
+      existing.id
+    );
     return;
   }
-  db.prepare(
-    "INSERT INTO whatsapp_connections (company_id, phone_number_id, waba_id, display_phone_number, environment, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)"
-  ).run(companyId, phoneNumberId, wabaId, displayPhoneNumber, environment, new Date().toISOString());
+  await db.run(
+    "INSERT INTO whatsapp_connections (company_id, phone_number_id, waba_id, display_phone_number, environment, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)",
+    companyId,
+    phoneNumberId,
+    wabaId,
+    displayPhoneNumber,
+    environment,
+    new Date().toISOString()
+  );
 }
 
 /**
@@ -117,10 +124,14 @@ export async function verifyPhoneNumberConnection(phoneNumberId: string): Promis
   }
 }
 
-export function recordVerification(phoneNumberId: string, result: VerifyResult): void {
-  db.prepare(
-    "UPDATE whatsapp_connections SET last_verified_at = ?, last_verified_ok = ?, last_verified_detail = ? WHERE phone_number_id = ?"
-  ).run(new Date().toISOString(), result.ok ? 1 : 0, result.detail, phoneNumberId);
+export async function recordVerification(phoneNumberId: string, result: VerifyResult): Promise<void> {
+  await db.run(
+    "UPDATE whatsapp_connections SET last_verified_at = ?, last_verified_ok = ?, last_verified_detail = ? WHERE phone_number_id = ?",
+    new Date().toISOString(),
+    result.ok ? 1 : 0,
+    result.detail,
+    phoneNumberId
+  );
 }
 
 export interface LastMessageInfo {
@@ -129,28 +140,26 @@ export interface LastMessageInfo {
 }
 
 /** Última mensagem REAL recebida (do cliente, com wamid) por esta empresa — evidência concreta, não presunção. */
-export function getLastRealInboundMessage(companyId: number): LastMessageInfo | undefined {
-  const row = db
-    .prepare(
-      `SELECT m.created_at, m.body FROM messages m
-       JOIN conversations c ON c.id = m.conversation_id
-       WHERE c.company_id = ? AND c.channel = 'WHATSAPP_OFICIAL' AND m.author_type = 'CLIENTE' AND m.external_id IS NOT NULL
-       ORDER BY m.id DESC LIMIT 1`
-    )
-    .get(companyId) as { created_at: string; body: string } | undefined;
+export async function getLastRealInboundMessage(companyId: number): Promise<LastMessageInfo | undefined> {
+  const row = await db.get<{ created_at: string; body: string }>(
+    `SELECT m.created_at, m.body FROM messages m
+     JOIN conversations c ON c.id = m.conversation_id
+     WHERE c.company_id = ? AND c.channel = 'WHATSAPP_OFICIAL' AND m.author_type = 'CLIENTE' AND m.external_id IS NOT NULL
+     ORDER BY m.id DESC LIMIT 1`,
+    companyId
+  );
   return row ? { createdAt: row.created_at, preview: row.body } : undefined;
 }
 
 /** Última resposta REAL enviada (aceita pela Graph API) por esta empresa. */
-export function getLastRealOutboundMessage(companyId: number): LastMessageInfo | undefined {
-  const row = db
-    .prepare(
-      `SELECT m.created_at, m.body FROM messages m
-       JOIN conversations c ON c.id = m.conversation_id
-       WHERE c.company_id = ? AND c.channel = 'WHATSAPP_OFICIAL' AND m.author_type = 'HUMANO' AND m.send_status = 'ENVIADA' AND m.external_id IS NOT NULL
-       ORDER BY m.id DESC LIMIT 1`
-    )
-    .get(companyId) as { created_at: string; body: string } | undefined;
+export async function getLastRealOutboundMessage(companyId: number): Promise<LastMessageInfo | undefined> {
+  const row = await db.get<{ created_at: string; body: string }>(
+    `SELECT m.created_at, m.body FROM messages m
+     JOIN conversations c ON c.id = m.conversation_id
+     WHERE c.company_id = ? AND c.channel = 'WHATSAPP_OFICIAL' AND m.author_type = 'HUMANO' AND m.send_status = 'ENVIADA' AND m.external_id IS NOT NULL
+     ORDER BY m.id DESC LIMIT 1`,
+    companyId
+  );
   return row ? { createdAt: row.created_at, preview: row.body } : undefined;
 }
 
@@ -169,15 +178,15 @@ export interface ConnectionStatusReport {
 }
 
 /** Monta o status real da conexão de uma empresa — a fonte de verdade da tela "Conexão do WhatsApp". */
-export function buildConnectionStatusReport(companyId: number): ConnectionStatusReport {
+export async function buildConnectionStatusReport(companyId: number): Promise<ConnectionStatusReport> {
   const creds = getWhatsappCredentials();
   const credentials = { verifyToken: !!creds.verifyToken, appSecret: !!creds.appSecret, accessToken: !!creds.accessToken };
-  const connection = listConnectionsForCompany(companyId).find((c) => c.active === 1) ?? null;
+  const connection = (await listConnectionsForCompany(companyId)).find((c) => c.active === 1) ?? null;
   const allCredentialsPresent = credentials.verifyToken && credentials.appSecret && credentials.accessToken;
 
   const mode: ConnectionMode = connection ? connection.environment : "DEMONSTRACAO";
-  const lastInbound = connection ? getLastRealInboundMessage(companyId) ?? null : null;
-  const lastOutbound = connection ? getLastRealOutboundMessage(companyId) ?? null : null;
+  const lastInbound = connection ? (await getLastRealInboundMessage(companyId)) ?? null : null;
+  const lastOutbound = connection ? (await getLastRealOutboundMessage(companyId)) ?? null : null;
 
   const pendencies: string[] = [];
   if (!connection) {

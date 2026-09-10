@@ -139,63 +139,65 @@ export function isExactOptionThree(text: string): boolean {
 
 // --- Contatos e conversas ---------------------------------------------------
 
-export function findOrCreateContact(companyId: number, name: string, phone: string): Contact {
-  const existing = db
-    .prepare("SELECT * FROM contacts WHERE company_id = ? AND phone = ?")
-    .get(companyId, phone) as Contact | undefined;
+export async function findOrCreateContact(companyId: number, name: string, phone: string): Promise<Contact> {
+  const existing = await db.get<Contact>("SELECT * FROM contacts WHERE company_id = ? AND phone = ?", companyId, phone);
   if (existing) return existing;
-  const info = db
-    .prepare("INSERT INTO contacts (company_id, name, phone, created_at) VALUES (?, ?, ?, ?)")
-    .run(companyId, name, phone, nowIso());
-  return db.prepare("SELECT * FROM contacts WHERE id = ?").get(info.lastInsertRowid) as Contact;
+  const row = await db.get<{ id: number }>(
+    "INSERT INTO contacts (company_id, name, phone, created_at) VALUES (?, ?, ?, ?) RETURNING id",
+    companyId,
+    name,
+    phone,
+    nowIso()
+  );
+  return (await db.get<Contact>("SELECT * FROM contacts WHERE id = ?", row!.id))!;
 }
 
-export function createConversation(
+export async function createConversation(
   companyId: number,
   contactId: number,
   mode: ConversationMode,
   channel: string = "SIMULADO"
-): Conversation {
+): Promise<Conversation> {
   const at = nowIso();
-  const info = db
-    .prepare(
-      `INSERT INTO conversations (company_id, contact_id, channel, mode, status, created_at, updated_at)
-       VALUES (?, ?, ?, ?, 'AUTO', ?, ?)`
-    )
-    .run(companyId, contactId, channel, mode, at, at);
-  return getConversation(companyId, Number(info.lastInsertRowid))!;
+  const row = await db.get<{ id: number }>(
+    `INSERT INTO conversations (company_id, contact_id, channel, mode, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, 'AUTO', ?, ?) RETURNING id`,
+    companyId,
+    contactId,
+    channel,
+    mode,
+    at,
+    at
+  );
+  return (await getConversation(companyId, row!.id))!;
 }
 
-export function getContact(companyId: number, contactId: number): Contact | undefined {
-  return db.prepare("SELECT * FROM contacts WHERE id = ? AND company_id = ?").get(contactId, companyId) as
-    | Contact
-    | undefined;
+export function getContact(companyId: number, contactId: number): Promise<Contact | undefined> {
+  return db.get<Contact>("SELECT * FROM contacts WHERE id = ? AND company_id = ?", contactId, companyId);
 }
 
 /** Última conversa ainda não encerrada desse contato (qualquer canal) — evita criar uma conversa nova a cada mensagem recebida. */
-export function findOpenConversationForContact(companyId: number, contactId: number): Conversation | undefined {
-  return db
-    .prepare(
-      `SELECT * FROM conversations
-       WHERE company_id = ? AND contact_id = ? AND status != 'ENCERRADO'
-       ORDER BY updated_at DESC LIMIT 1`
-    )
-    .get(companyId, contactId) as Conversation | undefined;
+export function findOpenConversationForContact(companyId: number, contactId: number): Promise<Conversation | undefined> {
+  return db.get<Conversation>(
+    `SELECT * FROM conversations
+     WHERE company_id = ? AND contact_id = ? AND status != 'ENCERRADO'
+     ORDER BY updated_at DESC LIMIT 1`,
+    companyId,
+    contactId
+  );
 }
 
-export function findOrCreateOpenConversation(
+export async function findOrCreateOpenConversation(
   companyId: number,
   contactId: number,
   mode: ConversationMode,
   channel: string
-): Conversation {
-  return findOpenConversationForContact(companyId, contactId) ?? createConversation(companyId, contactId, mode, channel);
+): Promise<Conversation> {
+  return (await findOpenConversationForContact(companyId, contactId)) ?? (await createConversation(companyId, contactId, mode, channel));
 }
 
-export function getConversation(companyId: number, conversationId: number): Conversation | undefined {
-  return db
-    .prepare("SELECT * FROM conversations WHERE id = ? AND company_id = ?")
-    .get(conversationId, companyId) as Conversation | undefined;
+export function getConversation(companyId: number, conversationId: number): Promise<Conversation | undefined> {
+  return db.get<Conversation>("SELECT * FROM conversations WHERE id = ? AND company_id = ?", conversationId, companyId);
 }
 
 export interface ConversationListItem extends Conversation {
@@ -207,23 +209,22 @@ export interface ConversationListItem extends Conversation {
   open_wait_started_at: string | null;
 }
 
-export function listConversations(companyId: number): ConversationListItem[] {
-  return db
-    .prepare(
-      `SELECT co.*, ct.name AS contact_name, ct.phone AS contact_phone,
-              lm.body AS last_message_preview, lm.created_at AS last_message_at,
-              (SELECT started_at FROM wait_episodes we
-                 WHERE we.conversation_id = co.id AND we.ended_at IS NULL
-                 ORDER BY we.id DESC LIMIT 1) AS open_wait_started_at
-       FROM conversations co
-       JOIN contacts ct ON ct.id = co.contact_id
-       LEFT JOIN messages lm ON lm.id = (
-         SELECT id FROM messages WHERE conversation_id = co.id ORDER BY id DESC LIMIT 1
-       )
-       WHERE co.company_id = ?
-       ORDER BY co.updated_at DESC`
-    )
-    .all(companyId) as ConversationListItem[];
+export function listConversations(companyId: number): Promise<ConversationListItem[]> {
+  return db.all<ConversationListItem>(
+    `SELECT co.*, ct.name AS contact_name, ct.phone AS contact_phone,
+            lm.body AS last_message_preview, lm.created_at AS last_message_at,
+            (SELECT started_at FROM wait_episodes we
+               WHERE we.conversation_id = co.id AND we.ended_at IS NULL
+               ORDER BY we.id DESC LIMIT 1) AS open_wait_started_at
+     FROM conversations co
+     JOIN contacts ct ON ct.id = co.contact_id
+     LEFT JOIN messages lm ON lm.id = (
+       SELECT id FROM messages WHERE conversation_id = co.id ORDER BY id DESC LIMIT 1
+     )
+     WHERE co.company_id = ?
+     ORDER BY co.updated_at DESC`,
+    companyId
+  );
 }
 
 export interface MessageWithAuthor extends Message {
@@ -231,48 +232,42 @@ export interface MessageWithAuthor extends Message {
   author_name: string | null;
 }
 
-export function listMessages(conversationId: number): MessageWithAuthor[] {
-  return db
-    .prepare(
-      `SELECT m.*, u.name AS author_name
-       FROM messages m
-       LEFT JOIN users u ON u.id = m.author_user_id
-       WHERE m.conversation_id = ?
-       ORDER BY m.id`
-    )
-    .all(conversationId) as MessageWithAuthor[];
+export function listMessages(conversationId: number): Promise<MessageWithAuthor[]> {
+  return db.all<MessageWithAuthor>(
+    `SELECT m.*, u.name AS author_name
+     FROM messages m
+     LEFT JOIN users u ON u.id = m.author_user_id
+     WHERE m.conversation_id = ?
+     ORDER BY m.id`,
+    conversationId
+  );
 }
 
-function setConversationStatus(conversationId: number, status: ConversationStatus, at: string): void {
-  db.prepare("UPDATE conversations SET status = ?, updated_at = ? WHERE id = ?").run(status, at, conversationId);
+async function setConversationStatus(conversationId: number, status: ConversationStatus, at: string): Promise<void> {
+  await db.run("UPDATE conversations SET status = ?, updated_at = ? WHERE id = ?", status, at, conversationId);
 }
 
 /** Contexto de menu ativo (ex.: robô acabou de mandar o menu 1/2/3 e aguarda a escolha do cliente). */
-function setPendingContext(conversationId: number, context: PendingContext | null): void {
-  db.prepare("UPDATE conversations SET pending_context = ? WHERE id = ?").run(context, conversationId);
+async function setPendingContext(conversationId: number, context: PendingContext | null): Promise<void> {
+  await db.run("UPDATE conversations SET pending_context = ? WHERE id = ?", context, conversationId);
 }
 
 /** Atualiza o status de entrega (ENTREGUE/LIDA) de uma mensagem já enviada, a partir do webhook de status da Meta. */
-export function updateMessageDeliveryStatus(companyId: number, externalId: string, status: DeliveryStatus): void {
-  db.prepare("UPDATE messages SET delivery_status = ? WHERE company_id = ? AND external_id = ?").run(
-    status,
-    companyId,
-    externalId
-  );
+export async function updateMessageDeliveryStatus(companyId: number, externalId: string, status: DeliveryStatus): Promise<void> {
+  await db.run("UPDATE messages SET delivery_status = ? WHERE company_id = ? AND external_id = ?", status, companyId, externalId);
 }
 
 // --- Episódios de espera por atendimento humano -----------------------------
 
-export function findOpenWaitEpisode(conversationId: number): WaitEpisode | undefined {
-  return db
-    .prepare("SELECT * FROM wait_episodes WHERE conversation_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1")
-    .get(conversationId) as WaitEpisode | undefined;
+export function findOpenWaitEpisode(conversationId: number): Promise<WaitEpisode | undefined> {
+  return db.get<WaitEpisode>(
+    "SELECT * FROM wait_episodes WHERE conversation_id = ? AND ended_at IS NULL ORDER BY id DESC LIMIT 1",
+    conversationId
+  );
 }
 
-export function listWaitEpisodes(conversationId: number): WaitEpisode[] {
-  return db
-    .prepare("SELECT * FROM wait_episodes WHERE conversation_id = ? ORDER BY id")
-    .all(conversationId) as WaitEpisode[];
+export function listWaitEpisodes(conversationId: number): Promise<WaitEpisode[]> {
+  return db.all<WaitEpisode>("SELECT * FROM wait_episodes WHERE conversation_id = ? ORDER BY id", conversationId);
 }
 
 /**
@@ -281,25 +276,32 @@ export function listWaitEpisodes(conversationId: number): WaitEpisode[] {
  * episódio (evento atrasado/fora de ordem): nesse caso ele é o "primeiro
  * gatilho válido" de verdade, e passa a valer (started_at, tipo e evidência).
  */
-export function startWaitIfNeeded(
+export async function startWaitIfNeeded(
   companyId: number,
   conversationId: number,
   triggerType: WaitTriggerType,
   triggerEvidence: string | null,
   at: string = nowIso()
-): void {
+): Promise<void> {
   const evidence = triggerEvidence ? triggerEvidence.slice(0, 300) : null;
-  const open = findOpenWaitEpisode(conversationId);
+  const open = await findOpenWaitEpisode(conversationId);
 
   if (!open) {
-    db.prepare(
-      "INSERT INTO wait_episodes (company_id, conversation_id, started_at, created_at, trigger_type, trigger_evidence) VALUES (?, ?, ?, ?, ?, ?)"
-    ).run(companyId, conversationId, at, at, triggerType, evidence);
+    await db.run(
+      "INSERT INTO wait_episodes (company_id, conversation_id, started_at, created_at, trigger_type, trigger_evidence) VALUES (?, ?, ?, ?, ?, ?)",
+      companyId,
+      conversationId,
+      at,
+      at,
+      triggerType,
+      evidence
+    );
     return;
   }
 
   if (new Date(at).getTime() < new Date(open.started_at).getTime()) {
-    db.prepare("UPDATE wait_episodes SET started_at = ?, trigger_type = ?, trigger_evidence = ? WHERE id = ?").run(
+    await db.run(
+      "UPDATE wait_episodes SET started_at = ?, trigger_type = ?, trigger_evidence = ? WHERE id = ?",
       at,
       triggerType,
       evidence,
@@ -309,15 +311,16 @@ export function startWaitIfNeeded(
 }
 
 /** Só uma resposta humana enviada com sucesso deve chamar isto (ver addMessage). */
-export function endOpenWaitEpisode(
+export async function endOpenWaitEpisode(
   conversationId: number,
   reason: "RESPOSTA_HUMANA",
   endedByUserId: number | null,
   at: string = nowIso()
-): void {
-  const open = findOpenWaitEpisode(conversationId);
+): Promise<void> {
+  const open = await findOpenWaitEpisode(conversationId);
   if (!open) return;
-  db.prepare("UPDATE wait_episodes SET ended_at = ?, ended_reason = ?, ended_by_user_id = ? WHERE id = ?").run(
+  await db.run(
+    "UPDATE wait_episodes SET ended_at = ?, ended_reason = ?, ended_by_user_id = ? WHERE id = ?",
     at,
     reason,
     endedByUserId,
@@ -333,8 +336,8 @@ export interface WaitSummary {
   totalBusinessMinutes: number;
 }
 
-export function summarizeWait(conversationId: number, timeZone: string, businessHours: BusinessHours): WaitSummary {
-  const episodes = listWaitEpisodes(conversationId);
+export async function summarizeWait(conversationId: number, timeZone: string, businessHours: BusinessHours): Promise<WaitSummary> {
+  const episodes = await listWaitEpisodes(conversationId);
   const now = new Date();
 
   let totalElapsedMs = 0;
@@ -361,10 +364,11 @@ export function summarizeWait(conversationId: number, timeZone: string, business
 // --- Ações do atendimento ----------------------------------------------------
 
 /** Atribuir responsável NUNCA encerra a espera — só muda quem está cuidando. */
-export function assumeConversation(companyId: number, conversationId: number, userId: number): void {
-  const convo = getConversation(companyId, conversationId);
+export async function assumeConversation(companyId: number, conversationId: number, userId: number): Promise<void> {
+  const convo = await getConversation(companyId, conversationId);
   if (!convo || convo.status === "ENCERRADO") return;
-  db.prepare("UPDATE conversations SET assigned_user_id = ?, status = 'HUMANO', updated_at = ? WHERE id = ?").run(
+  await db.run(
+    "UPDATE conversations SET assigned_user_id = ?, status = 'HUMANO', updated_at = ? WHERE id = ?",
     userId,
     nowIso(),
     conversationId
@@ -377,15 +381,15 @@ export function assumeConversation(companyId: number, conversationId: number, us
  * métricas de 1ª resposta), só impede que a conversa continue contando como
  * "aguardando agora" depois de encerrada.
  */
-export function closeConversation(companyId: number, conversationId: number): void {
-  const convo = getConversation(companyId, conversationId);
+export async function closeConversation(companyId: number, conversationId: number): Promise<void> {
+  const convo = await getConversation(companyId, conversationId);
   if (!convo) return;
   const at = nowIso();
-  const open = findOpenWaitEpisode(conversationId);
+  const open = await findOpenWaitEpisode(conversationId);
   if (open) {
-    db.prepare("UPDATE wait_episodes SET ended_at = ?, ended_reason = 'ENCERRADO_SEM_RESPOSTA' WHERE id = ?").run(at, open.id);
+    await db.run("UPDATE wait_episodes SET ended_at = ?, ended_reason = 'ENCERRADO_SEM_RESPOSTA' WHERE id = ?", at, open.id);
   }
-  setConversationStatus(conversationId, "ENCERRADO", at);
+  await setConversationStatus(conversationId, "ENCERRADO", at);
 }
 
 export interface AddMessageInput {
@@ -440,61 +444,60 @@ export interface AddMessageInput {
  * - Pedido/aviso repetido não reinicia nem duplica (startWaitIfNeeded é idempotente).
  * - Com externalId repetido, toda a função é idempotente.
  */
-export function addMessage(input: AddMessageInput): Message {
-  const convo = getConversation(input.companyId, input.conversationId);
+export async function addMessage(input: AddMessageInput): Promise<Message> {
+  const convo = await getConversation(input.companyId, input.conversationId);
   if (!convo) throw new Error("Conversa não encontrada.");
 
   if (input.externalId) {
-    const existing = db
-      .prepare("SELECT * FROM messages WHERE company_id = ? AND external_id = ?")
-      .get(input.companyId, input.externalId) as Message | undefined;
+    const existing = await db.get<Message>(
+      "SELECT * FROM messages WHERE company_id = ? AND external_id = ?",
+      input.companyId,
+      input.externalId
+    );
     if (existing) return existing;
   }
 
   const at = input.occurredAt && !Number.isNaN(new Date(input.occurredAt).getTime()) ? input.occurredAt : nowIso();
   const sendStatus: SendStatus = input.sendStatus ?? "ENVIADA";
 
-  const info = db
-    .prepare(
-      `INSERT INTO messages (company_id, conversation_id, author_type, author_user_id, body, send_status, created_at, external_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      input.companyId,
-      input.conversationId,
-      input.authorType,
-      input.authorUserId ?? null,
-      input.body,
-      sendStatus,
-      at,
-      input.externalId ?? null
-    );
+  const inserted = await db.get<{ id: number }>(
+    `INSERT INTO messages (company_id, conversation_id, author_type, author_user_id, body, send_status, created_at, external_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+    input.companyId,
+    input.conversationId,
+    input.authorType,
+    input.authorUserId ?? null,
+    input.body,
+    sendStatus,
+    at,
+    input.externalId ?? null
+  );
 
   const notClosed = convo.status !== "ENCERRADO";
 
   // Gatilho D — evento explícito da plataforma. Vale para qualquer autoria
   // (é a integração relatando o evento, não uma inferência sobre o texto).
   if (input.platformSignal === "EVENTO_PLATAFORMA" && notClosed) {
-    startWaitIfNeeded(input.companyId, input.conversationId, "EVENTO_PLATAFORMA", input.body || "evento explícito da plataforma", at);
-    setConversationStatus(input.conversationId, "AGUARDANDO_HUMANO", at);
-    setPendingContext(input.conversationId, null);
+    await startWaitIfNeeded(input.companyId, input.conversationId, "EVENTO_PLATAFORMA", input.body || "evento explícito da plataforma", at);
+    await setConversationStatus(input.conversationId, "AGUARDANDO_HUMANO", at);
+    await setPendingContext(input.conversationId, null);
   }
 
   if (input.authorType === "HUMANO") {
     if (sendStatus === "ENVIADA") {
-      endOpenWaitEpisode(input.conversationId, "RESPOSTA_HUMANA", input.authorUserId ?? null, at);
-      setConversationStatus(input.conversationId, "AGUARDANDO_CLIENTE", at);
+      await endOpenWaitEpisode(input.conversationId, "RESPOSTA_HUMANA", input.authorUserId ?? null, at);
+      await setConversationStatus(input.conversationId, "AGUARDANDO_CLIENTE", at);
     }
     // send_status FALHOU: nada muda além da mensagem registrada como falha.
   } else if ((input.authorType === "ROBO" || input.authorType === "AUTOMACAO") && notClosed) {
     // Gatilho C — frase fixa de transferência, em qualquer ponto da conversa.
     if (looksLikeTransferMessage(input.body)) {
-      startWaitIfNeeded(input.companyId, input.conversationId, "MENSAGEM_ROBO", input.body, at);
-      setConversationStatus(input.conversationId, "AGUARDANDO_HUMANO", at);
-      setPendingContext(input.conversationId, null);
+      await startWaitIfNeeded(input.companyId, input.conversationId, "MENSAGEM_ROBO", input.body, at);
+      await setConversationStatus(input.conversationId, "AGUARDANDO_HUMANO", at);
+      await setPendingContext(input.conversationId, null);
     } else if (looksLikeMenuMessage(input.body)) {
       // Abre a janela de contexto para o gatilho A ("3" só conta com o menu ativo).
-      setPendingContext(input.conversationId, "MENU_PRINCIPAL");
+      await setPendingContext(input.conversationId, "MENU_PRINCIPAL");
     }
     // Outras mensagens do robô: sem efeito no estado/espera nem no contexto do menu.
   } else if (input.authorType === "CLIENTE") {
@@ -518,19 +521,19 @@ export function addMessage(input: AddMessageInput): Message {
     }
 
     if (trigger) {
-      startWaitIfNeeded(input.companyId, input.conversationId, trigger.type, trigger.evidence, at);
+      await startWaitIfNeeded(input.companyId, input.conversationId, trigger.type, trigger.evidence, at);
       nextStatus = "AGUARDANDO_HUMANO";
     }
 
-    if (nextStatus) setConversationStatus(input.conversationId, nextStatus, at);
+    if (nextStatus) await setConversationStatus(input.conversationId, nextStatus, at);
     // O menu é uma janela de uma mensagem: a próxima resposta do cliente
     // sempre consome o contexto, seja "3" ou qualquer outra coisa.
-    if (menuWasActive) setPendingContext(input.conversationId, null);
+    if (menuWasActive) await setPendingContext(input.conversationId, null);
   }
   // DESCONHECIDO (sem platformSignal): mensagem registrada, sem efeito no estado/espera.
 
   // Toda mensagem conta como atividade: mantém a caixa de entrada ordenada pela conversa mais recente.
-  db.prepare("UPDATE conversations SET updated_at = ? WHERE id = ?").run(at, input.conversationId);
+  await db.run("UPDATE conversations SET updated_at = ? WHERE id = ?", at, input.conversationId);
 
-  return db.prepare("SELECT * FROM messages WHERE id = ?").get(info.lastInsertRowid) as Message;
+  return (await db.get<Message>("SELECT * FROM messages WHERE id = ?", inserted!.id))!;
 }

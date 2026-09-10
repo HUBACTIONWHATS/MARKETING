@@ -45,41 +45,43 @@ function nowIso(): string {
 }
 
 /** Provisiona o funil padrão para uma empresa que ainda não tem etapas. Idempotente. */
-export function ensureDefaultPipelineStages(companyId: number): void {
-  const count = db.prepare("SELECT COUNT(*) c FROM pipeline_stages WHERE company_id = ?").get(companyId) as {
-    c: number;
-  };
-  if (count.c > 0) return;
-  const insert = db.prepare(
-    "INSERT INTO pipeline_stages (company_id, name, position, is_won, is_lost, created_at) VALUES (?, ?, ?, ?, ?, ?)"
-  );
+export async function ensureDefaultPipelineStages(companyId: number): Promise<void> {
+  const count = await db.get<{ c: number }>("SELECT COUNT(*) c FROM pipeline_stages WHERE company_id = ?", companyId);
+  if (count && count.c > 0) return;
   const at = nowIso();
-  DEFAULT_STAGES.forEach((stage, idx) => {
-    insert.run(companyId, stage.name, idx + 1, stage.isWon ? 1 : 0, stage.isLost ? 1 : 0, at);
-  });
+  for (const [idx, stage] of DEFAULT_STAGES.entries()) {
+    await db.run(
+      "INSERT INTO pipeline_stages (company_id, name, position, is_won, is_lost, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      companyId,
+      stage.name,
+      idx + 1,
+      stage.isWon ? 1 : 0,
+      stage.isLost ? 1 : 0,
+      at
+    );
+  }
 }
 
 // --- Etapas do funil (configurável) -----------------------------------------
 
-export function listStages(companyId: number): PipelineStage[] {
-  return db.prepare("SELECT * FROM pipeline_stages WHERE company_id = ? ORDER BY position").all(companyId) as PipelineStage[];
+export function listStages(companyId: number): Promise<PipelineStage[]> {
+  return db.all<PipelineStage>("SELECT * FROM pipeline_stages WHERE company_id = ? ORDER BY position", companyId);
 }
 
-export function getStage(companyId: number, stageId: number): PipelineStage | undefined {
-  return db.prepare("SELECT * FROM pipeline_stages WHERE id = ? AND company_id = ?").get(stageId, companyId) as
-    | PipelineStage
-    | undefined;
+export function getStage(companyId: number, stageId: number): Promise<PipelineStage | undefined> {
+  return db.get<PipelineStage>("SELECT * FROM pipeline_stages WHERE id = ? AND company_id = ?", stageId, companyId);
 }
 
-function firstStage(companyId: number): PipelineStage {
-  ensureDefaultPipelineStages(companyId);
-  return listStages(companyId)[0];
+async function firstStage(companyId: number): Promise<PipelineStage> {
+  await ensureDefaultPipelineStages(companyId);
+  return (await listStages(companyId))[0];
 }
 
-export function addStage(companyId: number, name: string): void {
-  const stages = listStages(companyId);
+export async function addStage(companyId: number, name: string): Promise<void> {
+  const stages = await listStages(companyId);
   const position = stages.length > 0 ? Math.max(...stages.map((s) => s.position)) + 1 : 1;
-  db.prepare("INSERT INTO pipeline_stages (company_id, name, position, is_won, is_lost, created_at) VALUES (?, ?, ?, 0, 0, ?)").run(
+  await db.run(
+    "INSERT INTO pipeline_stages (company_id, name, position, is_won, is_lost, created_at) VALUES (?, ?, ?, 0, 0, ?)",
     companyId,
     name,
     position,
@@ -87,24 +89,22 @@ export function addStage(companyId: number, name: string): void {
   );
 }
 
-export function renameStage(companyId: number, stageId: number, name: string): void {
-  db.prepare("UPDATE pipeline_stages SET name = ? WHERE id = ? AND company_id = ?").run(name, stageId, companyId);
+export async function renameStage(companyId: number, stageId: number, name: string): Promise<void> {
+  await db.run("UPDATE pipeline_stages SET name = ? WHERE id = ? AND company_id = ?", name, stageId, companyId);
 }
 
-export function reorderStage(companyId: number, stageId: number, direction: "up" | "down"): void {
-  const stages = listStages(companyId);
+export async function reorderStage(companyId: number, stageId: number, direction: "up" | "down"): Promise<void> {
+  const stages = await listStages(companyId);
   const idx = stages.findIndex((s) => s.id === stageId);
   if (idx === -1) return;
   const swapIdx = direction === "up" ? idx - 1 : idx + 1;
   if (swapIdx < 0 || swapIdx >= stages.length) return;
   const a = stages[idx];
   const b = stages[swapIdx];
-  const update = db.prepare("UPDATE pipeline_stages SET position = ? WHERE id = ?");
-  const tx = db.transaction(() => {
-    update.run(b.position, a.id);
-    update.run(a.position, b.id);
+  await db.transaction(async (tx) => {
+    await tx.run("UPDATE pipeline_stages SET position = ? WHERE id = ?", b.position, a.id);
+    await tx.run("UPDATE pipeline_stages SET position = ? WHERE id = ?", a.position, b.id);
   });
-  tx();
 }
 
 export interface StageActionResult {
@@ -113,15 +113,15 @@ export interface StageActionResult {
 }
 
 /** Etapas marcadas como "venda concluída" ou "perdido" são o fim do funil e não podem ser excluídas ou perder o marcador — protege as métricas do dashboard. */
-export function deleteStage(companyId: number, stageId: number): StageActionResult {
-  const stage = getStage(companyId, stageId);
+export async function deleteStage(companyId: number, stageId: number): Promise<StageActionResult> {
+  const stage = await getStage(companyId, stageId);
   if (!stage) return { ok: false, error: "Etapa não encontrada." };
   if (stage.is_won || stage.is_lost) {
     return { ok: false, error: "Etapas de encerramento do funil (venda concluída / perdido) não podem ser excluídas." };
   }
-  const inUse = db.prepare("SELECT COUNT(*) c FROM opportunities WHERE stage_id = ?").get(stageId) as { c: number };
-  if (inUse.c > 0) return { ok: false, error: "Existem oportunidades nesta etapa. Mova-as antes de excluir." };
-  db.prepare("DELETE FROM pipeline_stages WHERE id = ? AND company_id = ?").run(stageId, companyId);
+  const inUse = await db.get<{ c: number }>("SELECT COUNT(*) c FROM opportunities WHERE stage_id = ?", stageId);
+  if (inUse && inUse.c > 0) return { ok: false, error: "Existem oportunidades nesta etapa. Mova-as antes de excluir." };
+  await db.run("DELETE FROM pipeline_stages WHERE id = ? AND company_id = ?", stageId, companyId);
   return { ok: true };
 }
 
@@ -136,43 +136,39 @@ export interface CreateOpportunityInput {
   scheduledAt?: string | null;
 }
 
-export function createOpportunity(input: CreateOpportunityInput): Opportunity {
-  const stage = firstStage(input.companyId);
+export async function createOpportunity(input: CreateOpportunityInput): Promise<Opportunity> {
+  const stage = await firstStage(input.companyId);
   const at = nowIso();
-  const info = db
-    .prepare(
-      `INSERT INTO opportunities (company_id, contact_id, stage_id, title, value_cents, responsible_user_id, scheduled_at, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(
-      input.companyId,
-      input.contactId,
-      stage.id,
-      input.title,
-      input.valueCents,
-      input.responsibleUserId ?? null,
-      input.scheduledAt ?? null,
-      at,
-      at
-    );
-  return getOpportunity(input.companyId, Number(info.lastInsertRowid))!;
+  const row = await db.get<{ id: number }>(
+    `INSERT INTO opportunities (company_id, contact_id, stage_id, title, value_cents, responsible_user_id, scheduled_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+    input.companyId,
+    input.contactId,
+    stage.id,
+    input.title,
+    input.valueCents,
+    input.responsibleUserId ?? null,
+    input.scheduledAt ?? null,
+    at,
+    at
+  );
+  return (await getOpportunity(input.companyId, row!.id))!;
 }
 
-export function getOpportunity(companyId: number, id: number): Opportunity | undefined {
-  return db.prepare("SELECT * FROM opportunities WHERE id = ? AND company_id = ?").get(id, companyId) as Opportunity | undefined;
+export function getOpportunity(companyId: number, id: number): Promise<Opportunity | undefined> {
+  return db.get<Opportunity>("SELECT * FROM opportunities WHERE id = ? AND company_id = ?", id, companyId);
 }
 
-export function listOpportunitiesByStage(companyId: number): Map<number, OpportunityWithDetails[]> {
-  const rows = db
-    .prepare(
-      `SELECT o.*, c.name AS contact_name, c.phone AS contact_phone, u.name AS responsible_name
-       FROM opportunities o
-       JOIN contacts c ON c.id = o.contact_id
-       LEFT JOIN users u ON u.id = o.responsible_user_id
-       WHERE o.company_id = ?
-       ORDER BY o.updated_at DESC`
-    )
-    .all(companyId) as OpportunityWithDetails[];
+export async function listOpportunitiesByStage(companyId: number): Promise<Map<number, OpportunityWithDetails[]>> {
+  const rows = await db.all<OpportunityWithDetails>(
+    `SELECT o.*, c.name AS contact_name, c.phone AS contact_phone, u.name AS responsible_name
+     FROM opportunities o
+     JOIN contacts c ON c.id = o.contact_id
+     LEFT JOIN users u ON u.id = o.responsible_user_id
+     WHERE o.company_id = ?
+     ORDER BY o.updated_at DESC`,
+    companyId
+  );
   const map = new Map<number, OpportunityWithDetails[]>();
   for (const row of rows) {
     if (!map.has(row.stage_id)) map.set(row.stage_id, []);
@@ -182,21 +178,22 @@ export function listOpportunitiesByStage(companyId: number): Map<number, Opportu
 }
 
 /** Move a oportunidade de etapa. Etapa "perdido" exige motivo. Fecha (closed_at) ao entrar em venda/perda, reabre se sair delas. */
-export function moveOpportunity(
+export async function moveOpportunity(
   companyId: number,
   opportunityId: number,
   newStageId: number,
   lostReason?: string
-): StageActionResult {
-  const opp = getOpportunity(companyId, opportunityId);
-  const stage = getStage(companyId, newStageId);
+): Promise<StageActionResult> {
+  const opp = await getOpportunity(companyId, opportunityId);
+  const stage = await getStage(companyId, newStageId);
   if (!opp || !stage) return { ok: false, error: "Oportunidade ou etapa não encontrada." };
   if (stage.is_lost && (!lostReason || !lostReason.trim())) {
     return { ok: false, error: "Informe o motivo da perda para mover para esta etapa." };
   }
   const at = nowIso();
   const closedAt = stage.is_won || stage.is_lost ? at : null;
-  db.prepare("UPDATE opportunities SET stage_id = ?, lost_reason = ?, closed_at = ?, updated_at = ? WHERE id = ?").run(
+  await db.run(
+    "UPDATE opportunities SET stage_id = ?, lost_reason = ?, closed_at = ?, updated_at = ? WHERE id = ?",
     newStageId,
     stage.is_lost ? lostReason!.trim() : null,
     closedAt,
@@ -212,10 +209,15 @@ export interface UpdateOpportunityFields {
   scheduledAt?: string | null;
 }
 
-export function updateOpportunityDetails(companyId: number, opportunityId: number, fields: UpdateOpportunityFields): void {
-  const opp = getOpportunity(companyId, opportunityId);
+export async function updateOpportunityDetails(
+  companyId: number,
+  opportunityId: number,
+  fields: UpdateOpportunityFields
+): Promise<void> {
+  const opp = await getOpportunity(companyId, opportunityId);
   if (!opp) return;
-  db.prepare("UPDATE opportunities SET responsible_user_id = ?, value_cents = ?, scheduled_at = ?, updated_at = ? WHERE id = ?").run(
+  await db.run(
+    "UPDATE opportunities SET responsible_user_id = ?, value_cents = ?, scheduled_at = ?, updated_at = ? WHERE id = ?",
     fields.responsibleUserId !== undefined ? fields.responsibleUserId : opp.responsible_user_id,
     fields.valueCents !== undefined ? fields.valueCents : opp.value_cents,
     fields.scheduledAt !== undefined ? fields.scheduledAt : opp.scheduled_at,

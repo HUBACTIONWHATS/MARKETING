@@ -7,6 +7,8 @@ import test from "node:test";
 const TEST_DB = path.join(__dirname, "..", "data", "test-whatsapp.sqlite3");
 if (fs.existsSync(TEST_DB)) fs.unlinkSync(TEST_DB);
 process.env.DATABASE_FILE = TEST_DB;
+process.env.TEST_SCHEMA = "test_whatsapp";
+process.env.TEST_SCHEMA_RESET = "1";
 
 type AttendanceModule = typeof import("./attendance.js");
 type DbModule = typeof import("./db.js");
@@ -21,15 +23,31 @@ test.before(async () => {
   A = await import("./attendance.js");
   Dbm = await import("./db.js");
   W = await import("./whatsapp.js");
-  Dbm.runMigrations();
+  await Dbm.runMigrations();
 });
 
-function makeCompany(): number {
+test.after(async () => {
+  await Dbm.db.close();
+});
+
+async function makeCompany(): Promise<number> {
   companySeq += 1;
-  const info = Dbm.db
-    .prepare("INSERT INTO companies (name, slug, created_at) VALUES (?, ?, datetime('now'))")
-    .run(`Empresa WA ${companySeq}`, `empresa-wa-${companySeq}`);
-  return Number(info.lastInsertRowid);
+  const row = await Dbm.db.get<{ id: number }>(
+    "INSERT INTO companies (name, slug, created_at) VALUES (?, ?, ?) RETURNING id",
+    `Empresa WA ${companySeq}`,
+    `empresa-wa-${companySeq}`,
+    new Date().toISOString()
+  );
+  return row!.id;
+}
+
+async function makeConnection(companyId: number, phoneNumberId: string): Promise<void> {
+  await Dbm.db.run(
+    "INSERT INTO whatsapp_connections (company_id, phone_number_id, environment, active, created_at) VALUES (?, ?, 'TESTE', 1, ?)",
+    companyId,
+    phoneNumberId,
+    new Date().toISOString()
+  );
 }
 
 // --- Assinatura do webhook ---------------------------------------------------
@@ -91,6 +109,7 @@ test("mensagem interativa (botão) vira texto do título; tipo não suportado vi
   ];
   assert.equal(W.parseWebhookPayload(withButton)[0].messages[0].body, "Falar com atendente");
   assert.equal(W.parseWebhookPayload(withButton)[0].messages[0].supported, true);
+  assert.equal(W.parseWebhookPayload(withButton)[0].messages[0].isInteractiveReply, true);
 
   const withImage = structuredClone(base);
   withImage.entry[0].changes[0].value.messages = [{ id: "w2", from: "55119", timestamp: "1", type: "image", image: { id: "media1" } }];
@@ -107,19 +126,19 @@ test("payload de outro objeto (não whatsapp_business_account) é ignorado sem e
 
 // --- Idempotência (reentrega do mesmo evento pela Meta) ----------------------
 
-test("mesmo external_id não duplica mensagem nem reinicia a espera (webhook pode reentregar)", () => {
-  const companyId = makeCompany();
-  const contact = A.findOrCreateContact(companyId, "Cliente WA", "+55 11 90000-9001");
-  const conv = A.createConversation(companyId, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
+test("mesmo external_id não duplica mensagem nem reinicia a espera (webhook pode reentregar)", async () => {
+  const companyId = await makeCompany();
+  const contact = await A.findOrCreateContact(companyId, "Cliente WA", "+55 11 90000-9001");
+  const conv = await A.createConversation(companyId, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
 
-  const first = A.addMessage({
+  const first = await A.addMessage({
     companyId,
     conversationId: conv.id,
     authorType: "CLIENTE",
     body: "quero atendente",
     externalId: "wamid.DUPLICADO",
   });
-  const second = A.addMessage({
+  const second = await A.addMessage({
     companyId,
     conversationId: conv.id,
     authorType: "CLIENTE",
@@ -128,22 +147,36 @@ test("mesmo external_id não duplica mensagem nem reinicia a espera (webhook pod
   });
 
   assert.equal(first.id, second.id, "reentrega deveria devolver a mesma mensagem, não criar outra");
-  const all = A.listMessages(conv.id);
+  const all = await A.listMessages(conv.id);
   assert.equal(all.length, 1, "não pode duplicar a mensagem no histórico");
-  assert.equal(A.listWaitEpisodes(conv.id).length, 1, "não pode duplicar o episódio de espera");
+  assert.equal((await A.listWaitEpisodes(conv.id)).length, 1, "não pode duplicar o episódio de espera");
 });
 
-test("conversa em aberto do mesmo contato é reaproveitada; contato encerrado abre uma nova", () => {
-  const companyId = makeCompany();
-  const contact = A.findOrCreateContact(companyId, "Cliente Reaproveita", "+55 11 90000-9002");
+test("conversa em aberto do mesmo contato é reaproveitada; contato encerrado abre uma nova", async () => {
+  const companyId = await makeCompany();
+  const contact = await A.findOrCreateContact(companyId, "Cliente Reaproveita", "+55 11 90000-9002");
 
-  const conv1 = A.findOrCreateOpenConversation(companyId, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
-  const conv1Again = A.findOrCreateOpenConversation(companyId, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
+  const conv1 = await A.findOrCreateOpenConversation(companyId, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
+  const conv1Again = await A.findOrCreateOpenConversation(companyId, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
   assert.equal(conv1.id, conv1Again.id);
 
-  A.closeConversation(companyId, conv1.id);
-  const conv2 = A.findOrCreateOpenConversation(companyId, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
+  await A.closeConversation(companyId, conv1.id);
+  const conv2 = await A.findOrCreateOpenConversation(companyId, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
   assert.notEqual(conv2.id, conv1.id, "conversa encerrada não deveria ser reaproveitada");
+});
+
+test("status de entrega (ENTREGUE/LIDA) é gravado na mensagem enviada pelo wamid, só na empresa dona", async () => {
+  const companyId = await makeCompany();
+  const otherCompanyId = await makeCompany();
+  const contact = await A.findOrCreateContact(companyId, "Cliente Entrega", "+55 11 90000-9003");
+  const conv = await A.createConversation(companyId, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
+  await A.addMessage({ companyId, conversationId: conv.id, authorType: "HUMANO", body: "olá", externalId: "wamid.OUT9" });
+
+  await A.updateMessageDeliveryStatus(otherCompanyId, "wamid.OUT9", "LIDA"); // outra empresa não pode alterar
+  assert.equal((await A.listMessages(conv.id))[0].delivery_status, null);
+
+  await A.updateMessageDeliveryStatus(companyId, "wamid.OUT9", "ENTREGUE");
+  assert.equal((await A.listMessages(conv.id))[0].delivery_status, "ENTREGUE");
 });
 
 // --- Envio sem credenciais -----------------------------------------------------
@@ -163,111 +196,89 @@ function clearWhatsappEnv(): void {
   delete process.env.WHATSAPP_ACCESS_TOKEN;
 }
 
-test("sem número associado: modo demonstração, mesmo com credenciais configuradas", () => {
-  clearWhatsappEnv();
+function setFakeCredentials(): void {
   process.env.WHATSAPP_VERIFY_TOKEN = "v";
   process.env.WHATSAPP_APP_SECRET = "s";
   process.env.WHATSAPP_ACCESS_TOKEN = "t";
-  const companyId = makeCompany();
+}
 
-  const report = W.buildConnectionStatusReport(companyId);
+test("sem número associado: modo demonstração, mesmo com credenciais configuradas", async () => {
+  clearWhatsappEnv();
+  setFakeCredentials();
+  const companyId = await makeCompany();
+
+  const report = await W.buildConnectionStatusReport(companyId);
   assert.equal(report.mode, "DEMONSTRACAO");
   assert.equal(report.statusLabel, "Modo demonstração");
   assert.equal(report.connection, null);
   clearWhatsappEnv();
 });
 
-test("número associado mas credenciais ausentes: 'Configuração incompleta', nunca 'Conectado'", () => {
+test("número associado mas credenciais ausentes: 'Configuração incompleta', nunca 'Conectado'", async () => {
   clearWhatsappEnv();
-  const companyId = makeCompany();
-  Dbm.db
-    .prepare(
-      "INSERT INTO whatsapp_connections (company_id, phone_number_id, environment, active, created_at) VALUES (?, 'PN1', 'TESTE', 1, datetime('now'))"
-    )
-    .run(companyId);
+  const companyId = await makeCompany();
+  await makeConnection(companyId, "PN1");
 
-  const report = W.buildConnectionStatusReport(companyId);
+  const report = await W.buildConnectionStatusReport(companyId);
   assert.equal(report.statusLabel, "Configuração incompleta");
   assert.notEqual(report.statusLabel, "Conectado");
 });
 
-test("número associado e credenciais completas, nunca verificado: 'Ainda não verificado'", () => {
+test("número associado e credenciais completas, nunca verificado: 'Ainda não verificado'", async () => {
   clearWhatsappEnv();
-  process.env.WHATSAPP_VERIFY_TOKEN = "v";
-  process.env.WHATSAPP_APP_SECRET = "s";
-  process.env.WHATSAPP_ACCESS_TOKEN = "t";
-  const companyId = makeCompany();
-  Dbm.db
-    .prepare(
-      "INSERT INTO whatsapp_connections (company_id, phone_number_id, environment, active, created_at) VALUES (?, 'PN2', 'TESTE', 1, datetime('now'))"
-    )
-    .run(companyId);
+  setFakeCredentials();
+  const companyId = await makeCompany();
+  await makeConnection(companyId, "PN2");
 
-  const report = W.buildConnectionStatusReport(companyId);
+  const report = await W.buildConnectionStatusReport(companyId);
   assert.equal(report.statusLabel, "Ainda não verificado");
   clearWhatsappEnv();
 });
 
-test("recordVerification grava o resultado real; status reflete sucesso e falha corretamente", () => {
+test("recordVerification grava o resultado real; status reflete sucesso e falha corretamente", async () => {
   clearWhatsappEnv();
-  process.env.WHATSAPP_VERIFY_TOKEN = "v";
-  process.env.WHATSAPP_APP_SECRET = "s";
-  process.env.WHATSAPP_ACCESS_TOKEN = "t";
-  const companyId = makeCompany();
-  Dbm.db
-    .prepare(
-      "INSERT INTO whatsapp_connections (company_id, phone_number_id, environment, active, created_at) VALUES (?, 'PN3', 'TESTE', 1, datetime('now'))"
-    )
-    .run(companyId);
+  setFakeCredentials();
+  const companyId = await makeCompany();
+  await makeConnection(companyId, "PN3");
 
-  W.recordVerification("PN3", { ok: true, detail: "Confirmado pela Meta: +55 11 90000-0000." });
-  assert.equal(W.buildConnectionStatusReport(companyId).statusLabel, "Verificado pela Meta");
+  await W.recordVerification("PN3", { ok: true, detail: "Confirmado pela Meta: +55 11 90000-0000." });
+  assert.equal((await W.buildConnectionStatusReport(companyId)).statusLabel, "Verificado pela Meta");
 
-  W.recordVerification("PN3", { ok: false, detail: "Token expirado." });
-  const failReport = W.buildConnectionStatusReport(companyId);
+  await W.recordVerification("PN3", { ok: false, detail: "Token expirado." });
+  const failReport = await W.buildConnectionStatusReport(companyId);
   assert.equal(failReport.statusLabel, "Falha na última verificação");
   assert.ok(failReport.pendencies.some((p) => p.includes("Token expirado")));
   clearWhatsappEnv();
 });
 
-test("evidências reais: última mensagem recebida/enviada só aparecem quando existem de verdade (com wamid)", () => {
+test("evidências reais: última mensagem recebida/enviada só aparecem quando existem de verdade (com wamid)", async () => {
   clearWhatsappEnv();
-  const companyId = makeCompany();
-  Dbm.db
-    .prepare(
-      "INSERT INTO whatsapp_connections (company_id, phone_number_id, environment, active, created_at) VALUES (?, 'PN4', 'TESTE', 1, datetime('now'))"
-    )
-    .run(companyId);
+  const companyId = await makeCompany();
+  await makeConnection(companyId, "PN4");
 
-  const reportBefore = W.buildConnectionStatusReport(companyId);
+  const reportBefore = await W.buildConnectionStatusReport(companyId);
   assert.equal(reportBefore.lastInbound, null);
   assert.equal(reportBefore.lastOutbound, null);
   assert.ok(reportBefore.pendencies.some((p) => p.includes("Nenhuma mensagem real de cliente")));
 
-  const contact = A.findOrCreateContact(companyId, "Cliente Evidencia", "+55 11 90000-9999");
-  const conv = A.createConversation(companyId, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
-  A.addMessage({ companyId, conversationId: conv.id, authorType: "CLIENTE", body: "oi", externalId: "wamid.IN1" });
-  A.addMessage({ companyId, conversationId: conv.id, authorType: "HUMANO", body: "olá!", externalId: "wamid.OUT1" });
+  const contact = await A.findOrCreateContact(companyId, "Cliente Evidencia", "+55 11 90000-9999");
+  const conv = await A.createConversation(companyId, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
+  await A.addMessage({ companyId, conversationId: conv.id, authorType: "CLIENTE", body: "oi", externalId: "wamid.IN1" });
+  await A.addMessage({ companyId, conversationId: conv.id, authorType: "HUMANO", body: "olá!", externalId: "wamid.OUT1" });
 
-  const reportAfter = W.buildConnectionStatusReport(companyId);
+  const reportAfter = await W.buildConnectionStatusReport(companyId);
   assert.ok(reportAfter.lastInbound);
   assert.ok(reportAfter.lastOutbound);
 });
 
-test("a pendência sobre o robô/atendimento atual não comprovado aparece sempre, mesmo tudo verificado", () => {
+test("a pendência sobre o robô/atendimento atual não comprovado aparece sempre, mesmo tudo verificado", async () => {
   clearWhatsappEnv();
-  process.env.WHATSAPP_VERIFY_TOKEN = "v";
-  process.env.WHATSAPP_APP_SECRET = "s";
-  process.env.WHATSAPP_ACCESS_TOKEN = "t";
-  const companyId = makeCompany();
-  Dbm.db
-    .prepare(
-      "INSERT INTO whatsapp_connections (company_id, phone_number_id, environment, active, created_at) VALUES (?, 'PN5', 'TESTE', 1, datetime('now'))"
-    )
-    .run(companyId);
-  W.recordVerification("PN5", { ok: true, detail: "ok" });
+  setFakeCredentials();
+  const companyId = await makeCompany();
+  await makeConnection(companyId, "PN5");
+  await W.recordVerification("PN5", { ok: true, detail: "ok" });
 
-  const report = W.buildConnectionStatusReport(companyId);
+  const report = await W.buildConnectionStatusReport(companyId);
   assert.ok(report.pendencies.some((p) => p.includes("robô/atendimento atual") && p.includes("não foi comprovada")));
   clearWhatsappEnv();
 });
@@ -277,4 +288,15 @@ test("verificar conexão sem token de acesso não chama a Meta e recusa com erro
   const result = await W.verifyPhoneNumberConnection("qualquer-id");
   assert.equal(result.ok, false);
   assert.match(result.detail, /não configurado/);
+});
+
+test("upsertConnection reatribui um número já cadastrado e mantém a unicidade do phone_number_id", async () => {
+  const companyA = await makeCompany();
+  const companyB = await makeCompany();
+  await W.upsertConnection(companyA, "PN-REUSO", null, "+55 11 1", "TESTE");
+  await W.upsertConnection(companyB, "PN-REUSO", "WABA", "+55 11 2", "PRODUCAO");
+  const found = await W.findConnectionByPhoneNumberId("PN-REUSO");
+  assert.equal(found?.company_id, companyB);
+  assert.equal(found?.environment, "PRODUCAO");
+  assert.equal((await W.listConnectionsForCompany(companyA)).length, 0);
 });

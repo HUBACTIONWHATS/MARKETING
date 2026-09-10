@@ -23,7 +23,7 @@ export interface User {
   name: string;
   email: string;
   password_hash: string;
-  is_platform_admin: number; // 0 | 1 (SQLite não tem boolean nativo)
+  is_platform_admin: number; // 0 | 1 (INTEGER nos dois bancos)
   active: number; // 0 | 1
   created_at: string;
 }
@@ -41,64 +41,56 @@ export interface MembershipWithCompany extends Membership {
   company_slug: string;
 }
 
-export function findUserByEmail(email: string): User | undefined {
-  return db.prepare("SELECT * FROM users WHERE email = ?").get(email) as User | undefined;
+export function findUserByEmail(email: string): Promise<User | undefined> {
+  return db.get<User>("SELECT * FROM users WHERE email = ?", email);
 }
 
-export function findUserById(id: number): User | undefined {
-  return db.prepare("SELECT * FROM users WHERE id = ?").get(id) as User | undefined;
+export function findUserById(id: number): Promise<User | undefined> {
+  return db.get<User>("SELECT * FROM users WHERE id = ?", id);
 }
 
-export function findCompanyById(id: number): Company | undefined {
-  return db.prepare("SELECT * FROM companies WHERE id = ?").get(id) as Company | undefined;
+export function findCompanyById(id: number): Promise<Company | undefined> {
+  return db.get<Company>("SELECT * FROM companies WHERE id = ?", id);
 }
 
-export function listCompanies(): Company[] {
-  return db.prepare("SELECT * FROM companies ORDER BY name").all() as Company[];
+export function listCompanies(): Promise<Company[]> {
+  return db.all<Company>("SELECT * FROM companies ORDER BY name");
 }
 
 /** Empresas autorizadas para o usuário, com o perfil dele em cada uma. */
-export function listMembershipsForUser(userId: number): MembershipWithCompany[] {
-  return db
-    .prepare(
-      `SELECT m.*, c.name AS company_name, c.slug AS company_slug
-       FROM memberships m
-       JOIN companies c ON c.id = m.company_id
-       WHERE m.user_id = ?
-       ORDER BY c.name`
-    )
-    .all(userId) as MembershipWithCompany[];
-}
-
-/** Fonte da verdade do isolamento: só existe acesso se houver uma linha de associação. */
-export function findMembership(userId: number, companyId: number): Membership | undefined {
-  return db
-    .prepare("SELECT * FROM memberships WHERE user_id = ? AND company_id = ?")
-    .get(userId, companyId) as Membership | undefined;
-}
-
-export function updateCompanySettings(companyId: number, timezone: string, businessHoursJson: string): void {
-  db.prepare("UPDATE companies SET timezone = ?, business_hours = ? WHERE id = ?").run(
-    timezone,
-    businessHoursJson,
-    companyId
+export function listMembershipsForUser(userId: number): Promise<MembershipWithCompany[]> {
+  return db.all<MembershipWithCompany>(
+    `SELECT m.*, c.name AS company_name, c.slug AS company_slug
+     FROM memberships m
+     JOIN companies c ON c.id = m.company_id
+     WHERE m.user_id = ?
+     ORDER BY c.name`,
+    userId
   );
 }
 
-export function updateSlaTarget(companyId: number, minutes: number): void {
-  db.prepare("UPDATE companies SET sla_first_response_minutes = ? WHERE id = ?").run(minutes, companyId);
+/** Fonte da verdade do isolamento: só existe acesso se houver uma linha de associação. */
+export function findMembership(userId: number, companyId: number): Promise<Membership | undefined> {
+  return db.get<Membership>("SELECT * FROM memberships WHERE user_id = ? AND company_id = ?", userId, companyId);
+}
+
+export async function updateCompanySettings(companyId: number, timezone: string, businessHoursJson: string): Promise<void> {
+  await db.run("UPDATE companies SET timezone = ?, business_hours = ? WHERE id = ?", timezone, businessHoursJson, companyId);
+}
+
+export async function updateSlaTarget(companyId: number, minutes: number): Promise<void> {
+  await db.run("UPDATE companies SET sla_first_response_minutes = ? WHERE id = ?", minutes, companyId);
 }
 
 /** Membros (admin + atendentes) de uma empresa, para preencher filtros e seletores de responsável. */
-export function listCompanyMembers(companyId: number): { user_id: number; name: string; role: Role }[] {
-  return db
-    .prepare(
-      `SELECT u.id AS user_id, u.name, m.role
-       FROM memberships m JOIN users u ON u.id = m.user_id
-       WHERE m.company_id = ?
-       ORDER BY u.name`
-    )
-    .all(companyId) as { user_id: number; name: string; role: Role }[];
+export function listCompanyMembers(companyId: number): Promise<{ user_id: number; name: string; role: Role }[]> {
+  return db.all<{ user_id: number; name: string; role: Role }>(
+    `SELECT u.id AS user_id, u.name, m.role
+     FROM memberships m JOIN users u ON u.id = m.user_id
+     WHERE m.company_id = ?
+     ORDER BY u.name`,
+    companyId
+  );
 }
 
 // --- Gestão pela Hub Action (painel da plataforma) ---------------------------
@@ -113,22 +105,22 @@ export function slugify(name: string): string {
     .slice(0, 60);
 }
 
-export function createCompany(name: string): Company {
+export async function createCompany(name: string): Promise<Company> {
   const base = slugify(name) || "empresa";
   let slug = base;
   let n = 2;
-  while (db.prepare("SELECT 1 FROM companies WHERE slug = ?").get(slug)) slug = `${base}-${n++}`;
-  const info = db.prepare("INSERT INTO companies (name, slug, created_at) VALUES (?, ?, datetime('now'))").run(name.trim(), slug);
-  return findCompanyById(Number(info.lastInsertRowid))!;
+  while (await db.get("SELECT 1 AS x FROM companies WHERE slug = ?", slug)) slug = `${base}-${n++}`;
+  const row = await db.get<{ id: number }>(
+    "INSERT INTO companies (name, slug, created_at) VALUES (?, ?, ?) RETURNING id",
+    name.trim(),
+    slug,
+    new Date().toISOString()
+  );
+  return (await findCompanyById(row!.id))!;
 }
 
-export function updateCompanyPlan(companyId: number, plan: CompanyPlan, suspended: boolean, notes: string | null): void {
-  db.prepare("UPDATE companies SET plan = ?, suspended = ?, plan_notes = ? WHERE id = ?").run(
-    plan,
-    suspended ? 1 : 0,
-    notes,
-    companyId
-  );
+export async function updateCompanyPlan(companyId: number, plan: CompanyPlan, suspended: boolean, notes: string | null): Promise<void> {
+  await db.run("UPDATE companies SET plan = ?, suspended = ?, plan_notes = ? WHERE id = ?", plan, suspended ? 1 : 0, notes, companyId);
 }
 
 export interface CompanyAdminRow extends Company {
@@ -136,15 +128,13 @@ export interface CompanyAdminRow extends Company {
   conversation_count: number;
 }
 
-export function listCompaniesForAdmin(): CompanyAdminRow[] {
-  return db
-    .prepare(
-      `SELECT c.*,
-              (SELECT COUNT(*) FROM memberships m WHERE m.company_id = c.id) AS member_count,
-              (SELECT COUNT(*) FROM conversations co WHERE co.company_id = c.id) AS conversation_count
-       FROM companies c ORDER BY c.name`
-    )
-    .all() as CompanyAdminRow[];
+export function listCompaniesForAdmin(): Promise<CompanyAdminRow[]> {
+  return db.all<CompanyAdminRow>(
+    `SELECT c.*,
+            (SELECT COUNT(*) FROM memberships m WHERE m.company_id = c.id) AS member_count,
+            (SELECT COUNT(*) FROM conversations co WHERE co.company_id = c.id) AS conversation_count
+     FROM companies c ORDER BY c.name`
+  );
 }
 
 export interface CompanyUserRow {
@@ -155,17 +145,16 @@ export interface CompanyUserRow {
   active: number;
 }
 
-export function listCompanyUsers(companyId: number): CompanyUserRow[] {
-  return db
-    .prepare(
-      `SELECT u.id AS user_id, u.name, u.email, m.role, u.active
-       FROM memberships m JOIN users u ON u.id = m.user_id
-       WHERE m.company_id = ? ORDER BY u.name`
-    )
-    .all(companyId) as CompanyUserRow[];
+export function listCompanyUsers(companyId: number): Promise<CompanyUserRow[]> {
+  return db.all<CompanyUserRow>(
+    `SELECT u.id AS user_id, u.name, u.email, m.role, u.active
+     FROM memberships m JOIN users u ON u.id = m.user_id
+     WHERE m.company_id = ? ORDER BY u.name`,
+    companyId
+  );
 }
 
-export function setUserActive(userId: number, active: boolean): void {
-  db.prepare("UPDATE users SET active = ? WHERE id = ?").run(active ? 1 : 0, userId);
-  if (!active) db.prepare("DELETE FROM sessions WHERE sess LIKE ?").run(`%"userId":${userId}%`);
+export async function setUserActive(userId: number, active: boolean): Promise<void> {
+  await db.run("UPDATE users SET active = ? WHERE id = ?", active ? 1 : 0, userId);
+  if (!active) await db.run("DELETE FROM sessions WHERE sess LIKE ?", `%"userId":${userId}%`);
 }

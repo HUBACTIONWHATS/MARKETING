@@ -16,7 +16,7 @@ import "./env";
 import { db, runMigrations } from "./db";
 import { upsertConnection, type WhatsappEnvironment } from "./whatsapp";
 
-function main(): void {
+async function main(): Promise<void> {
   const [slug, phoneNumberId, envArg, wabaId, displayPhoneNumber] = process.argv.slice(2);
   if (!slug || !phoneNumberId) {
     console.error(
@@ -30,23 +30,25 @@ function main(): void {
   }
   const environment: WhatsappEnvironment = envArg === "producao" ? "PRODUCAO" : "TESTE";
 
-  runMigrations();
+  await runMigrations();
 
-  const company = db.prepare("SELECT id, name FROM companies WHERE slug = ?").get(slug) as
-    | { id: number; name: string }
-    | undefined;
+  const company = await db.get<{ id: number; name: string }>("SELECT id, name FROM companies WHERE slug = ?", slug);
   if (!company) {
     console.error(`Empresa com slug "${slug}" não encontrada.`);
     process.exit(1);
   }
 
-  upsertConnection(company.id, phoneNumberId, wabaId || null, displayPhoneNumber || null, environment);
+  await upsertConnection(company.id, phoneNumberId, wabaId || null, displayPhoneNumber || null, environment);
   console.log(
     `OK: phone_number_id ${phoneNumberId} associado à empresa "${company.name}" (id ${company.id}), ambiente ${environment}.`
   );
   console.log("Lembrete: isso só faz efeito de verdade se WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET e");
   console.log("WHATSAPP_ACCESS_TOKEN também estiverem configurados no .env e o webhook cadastrado no Meta for Developers.");
   console.log('Na tela Configurações → Conexão do WhatsApp, use "Verificar agora" para confirmar de verdade com a Meta.');
+  await db.close();
 }
 
-main();
+main().catch((err) => {
+  console.error("Falhou:", err);
+  process.exit(1);
+});

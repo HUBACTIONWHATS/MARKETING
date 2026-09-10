@@ -12,13 +12,13 @@ export function verifyPassword(password: string, hash: string): boolean {
 }
 
 /** Exige sessão válida. Carrega o usuário em res.locals.user. */
-export function requireAuth(req: Request, res: Response, next: NextFunction): void {
+export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
   const userId = req.session.userId;
   if (!userId) {
     res.redirect("/login");
     return;
   }
-  const user = findUserById(userId);
+  const user = await findUserById(userId);
   if (!user || !user.active) {
     // Usuário removido ou desativado pela Hub Action/administrador: sessão deixa de valer.
     req.session.destroy(() => res.redirect("/login"));
@@ -29,8 +29,8 @@ export function requireAuth(req: Request, res: Response, next: NextFunction): vo
 }
 
 /** Exige administrador da plataforma. */
-export function requirePlatformAdmin(req: Request, res: Response, next: NextFunction): void {
-  requireAuth(req, res, () => {
+export async function requirePlatformAdmin(req: Request, res: Response, next: NextFunction): Promise<void> {
+  await requireAuth(req, res, () => {
     if (!res.locals.user.is_platform_admin) {
       res.status(403).send(forbiddenPage());
       return;
@@ -45,19 +45,19 @@ export function requirePlatformAdmin(req: Request, res: Response, next: NextFunc
  * Administrador da plataforma NÃO herda acesso automático às páginas da
  * empresa — o painel dele é separado (/admin) e não expõe dados operacionais.
  */
-export function requireCompanyAccess(req: Request, res: Response, next: NextFunction): void {
-  requireAuth(req, res, () => {
+export async function requireCompanyAccess(req: Request, res: Response, next: NextFunction): Promise<void> {
+  await requireAuth(req, res, async () => {
     const companyId = Number(req.params.companyId);
     if (!Number.isInteger(companyId)) {
       res.status(404).send("Empresa não encontrada.");
       return;
     }
-    const company = findCompanyById(companyId);
+    const company = await findCompanyById(companyId);
     if (!company) {
       res.status(404).send("Empresa não encontrada.");
       return;
     }
-    const membership = findMembership(res.locals.user.id, companyId);
+    const membership = await findMembership(res.locals.user.id, companyId);
     if (!membership) {
       res.status(403).send(forbiddenPage());
       return;
