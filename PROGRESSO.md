@@ -463,3 +463,35 @@ O usuário criou o repositório **privado** [github.com/HUBACTIONWHATS/MARKETING
 
 - Render: nenhuma conta/serviço criado ainda (ação acima). Publicação em si aguardando sua confirmação final, como pedido.
 - Número comercial, recebimento/envio reais e robô: pendentes, como já declarado nas telas.
+
+## Etapa 11 — Primeiro deploy no Render: erro ERESOLVE (não reproduzido) e lacuna de configuração encontrada
+
+O usuário publicou o serviço no Render (fora do fluxo combinado de "uma ação por vez" — decisão dele, registrada aqui sem julgamento). O primeiro build falhou com `npm ERESOLVE: unable to resolve dependency tree`; um novo deploy, logo em seguida, teve sucesso ("Deploy succeeded"), sem que o log de erro completo chegasse a ser compartilhado.
+
+### Investigação do ERESOLVE
+
+Sem o log detalhado (o npm sempre imprime, junto da mensagem, o par exato de pacotes em conflito — não recebido), tentei reproduzir localmente por 5 caminhos diferentes, todos limpos, sem erro:
+
+1. `npm ci` (instalação limpa a partir do lockfile).
+2. `npm install --include=dev` (comando exato do `render.yaml`).
+3. O mesmo, com `NODE_ENV=production` como variável de ambiente real (igual ao Render).
+4. O mesmo, com `--strict-peer-deps` (força o npm a recusar qualquer conflito que normalmente resolveria sozinho).
+5. O mesmo, usando `npm@10` (versão mais próxima da que hospedagens costumam usar por padrão) em vez do `npm@11` local.
+
+Revisão manual de todas as `peerDependencies` na árvore de dependências: só `pg` → `pg-native` (opcional, `peerDependenciesMeta.optional: true`, uso normal e correto). Nada indicando conflito real.
+
+**Conclusão**: sem o log exato, não há evidência de um conflito real no projeto para corrigir — `package.json` e `package-lock.json` não foram alterados (mudar às cegas arriscaria introduzir um problema nesses arquivos, não corrigir um). Mais provável: uma falha transitória do Render (cache de build, hiccup do registro do npm) que se resolveu num novo deploy — hipótese a confirmar com o usuário.
+
+### Verificação do site publicado (leitura, sem alterar nada)
+
+Acessei `https://hub-action-crm-demo.onrender.com` só para conferir (GET em `/health` e `/login`, sem enviar formulário nem tentar login):
+
+- **Cookie de sessão em produção**: confirmado `HttpOnly; Secure; SameSite=Lax` nos cabeçalhos reais de resposta — a segurança de cookie está funcionando de verdade no Render, não só no teste simulado.
+- **CSRF em produção**: confirmado — o token `_csrf` está sendo injetado no formulário de login ao vivo.
+- **Lacuna crítica encontrada**: `/health` responde `{"status":"ok","db":"sqlite"}` — a variável `DATABASE_URL` **não foi configurada** no painel do Render. O app caiu no SQLite local por padrão (comportamento correto do código), mas o plano gratuito do Render **não tem disco persistente**: esse banco é apagado a cada reinício/novo deploy. Como o seed nunca roda sozinho (por decisão do usuário, ver Etapa 10), **não existe nenhuma conta para login nesse site enquanto essa variável não for configurada**.
+
+### Pendências reais
+
+- Confirmar com o usuário o que mudou entre o primeiro deploy (falhou) e o segundo (passou), para decidir se ainda é preciso alguma correção de dependências.
+- **Configurar `DATABASE_URL` no painel do Render** (Environment → colar a mesma connection string da Neon já usada localmente) para conectar ao banco real e permitir login — sem isso o piloto publicado não é utilizável.
+- Nenhum arquivo de código foi alterado nesta etapa. Nenhum segredo, `.env` ou dado pessoal foi tocado (só leitura de cabeçalhos HTTP públicos do próprio serviço).
