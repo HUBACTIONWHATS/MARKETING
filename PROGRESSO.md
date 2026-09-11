@@ -443,12 +443,23 @@ Pedido pelo usuário: preparar o Render para demonstração externa, com checkli
 - `npm install` após mover `better-sqlite3` para `optionalDependencies`: `package-lock.json` regenerado, sem quebra.
 - Confirmado com `git remote -v`: **não existe repositório remoto configurado** (só local, branch `master`, com commits).
 
+### Repositório remoto — CRIADO e código enviado (2026-09-10)
+
+O usuário criou o repositório **privado** [github.com/HUBACTIONWHATS/MARKETING](https://github.com/HUBACTIONWHATS/MARKETING). Antes do envio, foi feita uma auditoria completa do histórico do git (13 commits, todos os arquivos, não só o estado atual) com varredura por 4 ângulos independentes (nomes de arquivo suspeitos em todo o histórico; conteúdo de todos os commits por padrões de segredo; binários/bancos rastreados; documentação e testes por dados pessoais/credenciais reais), seguida de verificação independente dos únicos 2 achados brutos:
+
+- `scripts/pg-local.ts`: usuário/senha fixos, mas só para um Postgres **local e efêmero** de teste (nunca um banco real) — não é vazamento.
+- `src/seed.ts`: senha fixa `"trocar123"` usada **só** quando o banco é SQLite local; no Postgres/Neon o seed sempre gera senha aleatória por conta — não é vazamento.
+
+**Resultado: nenhum vazamento real confirmado.** `.env` nunca foi commitado em nenhum momento do histórico; sem arquivos `.pem/.key/.db/.sqlite`; sem credenciais/tokens/strings de conexão reais; sem dados pessoais de cliente (só os fictícios de demonstração, já conhecidos e documentados).
+
+`origin` configurado (`https://github.com/HUBACTIONWHATS/MARKETING.git`); repositório remoto confirmado vazio antes do envio (nada para preservar); autenticação via Gerenciador de Credenciais do Windows (login oficial do GitHub, sem senha/token na conversa). `git push -u origin master` confirmado com sucesso: HEAD local e remoto idênticos (`f24cd04...`), branch rastreando `origin/master`.
+
 ### Depende de você (próxima ação, uma de cada vez)
 
-1. **Criar um repositório no GitHub** (recomendo privado, já que o código terá lógica de negócio) para o Render poder implantar a partir dele. Ainda não crie o Web Service no Render — esse é o passo seguinte, depois que o código estiver lá.
+1. ~~Criar um repositório no GitHub~~ — feito, código enviado.
+2. **Próxima ação — criar a conta no Render e conectar ao GitHub** (sem cartão, plano gratuito): entrar em https://render.com, criar conta (pode ser via login do GitHub), e autorizar o Render a acessar o repositório `HUBACTIONWHATS/MARKETING` quando pedido. **Ainda não clicar em "New Blueprint"/"Apply" nem criar o Web Service** — isso já cria o serviço e inicia a implantação, que é o passo de publicação em si, ainda pendente da sua confirmação final.
 
 ### Pendências reais
 
-- Repositório remoto: não existe (ação acima).
-- Render: nenhuma conta/serviço criado (aguardando repositório remoto e sua confirmação final para publicar).
+- Render: nenhuma conta/serviço criado ainda (ação acima). Publicação em si aguardando sua confirmação final, como pedido.
 - Número comercial, recebimento/envio reais e robô: pendentes, como já declarado nas telas.
