@@ -55,9 +55,24 @@ Resumo do que sobrou de gratuito com uso comercial permitido:
 
 Observações honestas sobre a Neon no gratuito: 0,5 GB por projeto; o "compute" desliga quando ocioso e religa sozinho em poucos segundos na primeira consulta (você pode notar 1–3 s de demora depois de um tempo parado); histórico para restauração pontual com retenção curta — confira o valor atual no painel; `pg_dump` manual funciona quando quiser um backup próprio. Se a verificação do certificado TLS falhar no seu ambiente (raro), a variável `DATABASE_SSL=no-verify` é o contorno documentado — não use `disable` com a Neon.
 
-### Render — só depois da sua confirmação
+### Render — preparado, aguardando sua confirmação para publicar
 
-Não configurei nada no Render. Quando você confirmar, o passo a passo será: conta gratuita (sem cartão), **Web Service** apontando para o repositório, comando de build `npm install && npm run build`, comando de start `npm start`, e as variáveis da seção 3 (incluindo `DATABASE_URL` da Neon). Reforço: o serviço gratuito **dorme** — aceitável para a demonstração externa, **não** para webhooks reais.
+Nada foi criado no Render ainda (nenhuma conta, nenhum serviço). O que já está pronto no repositório, para quando você confirmar:
+
+- **[render.yaml](render.yaml)** (Blueprint): descreve o serviço pronto para importar — plano `free`, comando de build `npm install --include=dev && npm run build` (o `--include=dev` é necessário porque o `npm install` do Render roda com `NODE_ENV=production`, e sem essa flag algumas versões do `npm` pulam as `devDependencies` — o `typescript`, usado no build, é uma delas), comando de start `npm start`, verificação de saúde em `/health`, e as variáveis de ambiente (com `SESSION_SECRET` gerado automaticamente pelo próprio Render e `DATABASE_URL` marcada como "preencher manualmente", nunca gravada no arquivo).
+- Passo a passo (quando você autorizar): conta gratuita no Render (sem cartão) → "New" → "Blueprint" → apontar para o repositório → o Render lê `render.yaml` sozinho → você cola a `DATABASE_URL` da Neon quando pedido → confirma. Se preferir não usar Blueprint, os mesmos valores podem ser digitados à mão em "New" → "Web Service".
+- Reforço: o serviço gratuito **dorme** após 15 min sem uso — aceitável para a demonstração externa, **não** para webhooks reais.
+
+### Reforços de segurança feitos nesta etapa (verificados, antes de publicar)
+
+- **CSRF**: token por sessão, exigido em todo formulário (`POST`) do painel; injetado automaticamente nas telas, sem precisar editar view por view. Testado simulando o proxy do Render (`X-Forwarded-Proto: https`): formulário sem token ou com token errado → bloqueado; com token certo → passa.
+- **Limite de tentativas de login**: 5 tentativas erradas por e-mail+IP em 15 min bloqueiam por 15 min (fica só em memória do processo — reinicia ao reiniciar o serviço, o que é aceitável para o piloto). Tentativa bloqueada também vai para o log de auditoria.
+- **`SESSION_SECRET`**: já era exigido (≥ 32 caracteres) para iniciar em produção; o `render.yaml` pede para o próprio Render gerar um valor aleatório automaticamente (você nunca digita nem vê esse segredo).
+- **Cookie de sessão seguro**: confirmado que `trust proxy` faz o Express reconhecer o HTTPS do Render (que termina o TLS antes de chegar na aplicação) e o cookie sai com `secure` ligado nesse caso.
+- **Modo demonstração independente da produção**: antes, uma única variável (`NODE_ENV`) controlava ao mesmo tempo "ligar segurança de produção" e "mostrar banner/simulador de demonstração" — não dava para ter os dois ligados juntos. Agora são duas variáveis independentes: `NODE_ENV=production` (segurança) e `DEMO_MODE` (banner e simulador, ligado por padrão). O piloto no Render sobe com as duas coisas ligadas ao mesmo tempo: seguro **e** visivelmente de demonstração.
+- **Seed sem risco de apagar dados**: o `npm run db:seed` nunca apaga nem recria nada — só cria uma conta se o e-mail ainda não existir; contas já existentes não têm a senha tocada, e ele não roda sozinho na inicialização do serviço (só quando você rodar manualmente, uma vez).
+- **Senhas de demonstração deixam de ser previsíveis no banco remoto**: no SQLite local continuam fixas (`trocar123`, só no seu computador). No Postgres (Neon, potencialmente público) o seed agora gera uma senha aleatória diferente para cada conta nova e mostra cada uma só uma vez no terminal — ou você pode escolher a senha de cada conta por variável de ambiente (`PLATFORM_ADMIN_PASSWORD`, `DEMO_A_ADMIN_PASSWORD`, `DEMO_A_AGENT_PASSWORD`, `DEMO_B_ADMIN_PASSWORD`, `DEMO_B_AGENT_PASSWORD`) na hora de rodar o seed.
+- **`.env` e credenciais**: confirmado que `.env` está no `.gitignore` e nunca foi commitado (só existe `.env.example`, sem valores reais).
 
 ### Alternativa mantendo SQLite (sem migrar o banco agora)
 
@@ -73,7 +88,8 @@ Variáveis de ambiente (nunca no código, nunca no Git):
 
 | Variável | Obrigatória | O que é |
 |---|---|---|
-| `NODE_ENV=production` | Sim | Desliga simulador, seed e banner de demonstração; exige `SESSION_SECRET`; cookie seguro |
+| `NODE_ENV=production` | Sim | Liga a segurança de produção: exige `SESSION_SECRET`, cookie seguro, `trust proxy`. **Não** desliga mais o banner/simulador — isso agora é o `DEMO_MODE` (ver abaixo) |
+| `DEMO_MODE` | Não (padrão: ligado) | Mostra o banner amarelo e o simulador de conversa. Deixe ligado no piloto (não defina, ou `DEMO_MODE=true`); só desligue (`DEMO_MODE=false`) quando o WhatsApp real estiver conectado — nesse caso o seed também passa a recusar rodar |
 | `SESSION_SECRET` | Sim (≥ 32 caracteres) | Gere com `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
 | `PUBLIC_BASE_URL` | Sim | Ex.: `https://hubaction.onrender.com` — usado nos links de convite/redefinição |
 | `PORT` | Normalmente a hospedagem define | Porta HTTP |
@@ -82,7 +98,7 @@ Variáveis de ambiente (nunca no código, nunca no Git):
 | `DATABASE_FILE` | Só sem `DATABASE_URL` | Caminho do arquivo SQLite (desenvolvimento) |
 | `WHATSAPP_*` | Não (piloto demo) | Só quando for conectar número real — ver CONEXAO_WHATSAPP.md |
 
-**Atenção — piloto de demonstração em produção**: com `NODE_ENV=production` o simulador some (correto para clientes reais), mas o piloto é demonstrativo. Decida uma das duas formas antes de publicar: (a) publicar **sem** `NODE_ENV=production` — o banner amarelo e o simulador continuam, deixando claro que é demonstração (recomendado para o piloto); nesse caso, mesmo assim configure `SESSION_SECRET` forte; ou (b) publicar com `NODE_ENV=production` e alimentar os dados de demonstração pelo seed antes (o seed é bloqueado em produção — rodar antes de ligar a flag).
+**Piloto de demonstração em produção**: o piloto no Render sobe com `NODE_ENV=production` (segurança de verdade: `SESSION_SECRET` obrigatório, cookie seguro, CSRF, limite de tentativas de login) **e** `DEMO_MODE` ligado (banner amarelo e simulador continuam visíveis, deixando claro que é demonstração) ao mesmo tempo — as duas coisas não competem mais entre si.
 
 Primeiro acesso da Hub Action: crie o administrador da plataforma com o seed **ou** rode manualmente `npx tsx src/seed.ts` só uma vez antes de publicar (ele cria `admin@hubaction.dev` — troque a senha imediatamente pelo link de redefinição do painel). Os usuários de demonstração `*@empresa-a.dev` / `*@empresa-b.dev` **não devem existir no piloto externo**: crie as empresas dos clientes pelo painel e convide-os por link.
 
@@ -104,14 +120,17 @@ Primeiro acesso da Hub Action: crie o administrador da plataforma com o seed **o
 - Log de auditoria (`/admin/log`): login ok/falha, convites, redefinições, planos, ativação/desativação.
 - Consultas SQL parametrizadas em todo o código.
 
-**Lacunas conhecidas (não corrigidas nesta etapa, para decisão sua):** sem limite de tentativas de login (força bruta); sem proteção CSRF além do `sameSite=lax`; credenciais do WhatsApp são globais do servidor (um número real por instalação, não por empresa); sem 2FA.
+- Proteção CSRF (token por sessão em todo formulário) e limite de tentativas de login (5 por e-mail+IP a cada 15 min) — implementados nesta etapa, ver seção 2.
+
+**Lacunas conhecidas (não corrigidas nesta etapa, para decisão sua):** credenciais do WhatsApp são globais do servidor (um número real por instalação, não por empresa); sem 2FA.
 
 ## 6. Roteiro de publicação (quando você autorizar)
 
-1. Decidir: Render+Neon (exige a migração para Postgres primeiro) **ou** VM com SQLite.
-2. Criar as contas nos serviços escolhidos (você, com seu e-mail; nenhum cartão é exigido nos planos gratuitos citados).
-3. Subir o código (repositório Git) e configurar as variáveis da seção 3.
-4. Rodar o seed uma vez (cria a Hub Action e o funil padrão), trocar a senha da Hub Action.
-5. Abrir `https://<sua-url>/health` → `{"status":"ok"}`; abrir `/login`; criar a primeira empresa cliente e o convite.
-6. Testar o isolamento com dois clientes (cada um só vê o seu painel) antes de mandar convites de verdade.
-7. Só depois, e em etapa própria: número de teste da Meta → número comercial (checklist de CONEXAO_WHATSAPP.md).
+1. ~~Decidir: Render+Neon (exige a migração para Postgres primeiro) ou VM com SQLite~~ — decidido: Render+Neon.
+2. ~~Criar as contas nos serviços escolhidos~~ — Neon: feito e confirmado. Render: falta você criar a conta (sem cartão).
+3. **Repositório remoto (GitHub) — verificado nesta etapa: ainda não existe.** O projeto tem git local (branch `master`, com commits) mas nenhum `origin` configurado. O Render precisa de um repositório Git para o deploy (Blueprint/Web Service lê direto do GitHub). Esse é o próximo passo antes de continuar — ver mensagem de acompanhamento.
+4. Subir o código para esse repositório e configurar as variáveis da seção 3 (no Render, o `render.yaml` já prepara a maioria — só falta colar a `DATABASE_URL` da Neon).
+5. Rodar o seed uma vez (cria a Hub Action e o funil padrão), trocar a senha da Hub Action.
+6. Abrir `https://<sua-url>/health` → `{"status":"ok"}`; abrir `/login`; criar a primeira empresa cliente e o convite.
+7. Testar o isolamento com dois clientes (cada um só vê o seu painel) antes de mandar convites de verdade.
+8. Só depois, e em etapa própria: número de teste da Meta → número comercial (checklist de CONEXAO_WHATSAPP.md).

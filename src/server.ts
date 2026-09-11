@@ -13,6 +13,8 @@ import {
   listPendingInvites,
 } from "./access";
 import { requireAuth, requireCompanyAccess, requirePlatformAdmin, verifyPassword } from "./auth";
+import { csrfMiddleware } from "./csrf";
+import { checkLoginThrottle, clearLoginThrottle, recordLoginFailure } from "./loginThrottle";
 import { SqliteSessionStore } from "./sessionStore";
 import {
   addMessage,
@@ -95,17 +97,26 @@ import {
 
 const app = express();
 const PORT = process.env.PORT ? Number(process.env.PORT) : 3000;
-const IS_DEV = process.env.NODE_ENV !== "production";
 
-// --- Guardas de produção ----------------------------------------------------
-// Em produção: exige SESSION_SECRET real, confia no proxy da hospedagem (HTTPS
-// terminado nele) e marca o cookie como secure. Nada disso muda o uso local.
-if (!IS_DEV) {
+// Duas coisas independentes, que já foram confundidas numa flag só e por
+// isso são explicadas aqui:
+// - IS_PRODUCTION: estamos numa hospedagem de verdade, exposta na internet?
+//   Liga o endurecimento de segurança (cookie seguro, exigir SESSION_SECRET
+//   forte, confiar no proxy). Vem de NODE_ENV=production.
+// - DEMO_MODE: mostra o aviso de dados fictícios e libera o simulador
+//   (cliente/robô simulados)? Independente da anterior — o piloto de
+//   demonstração no Render roda com as DUAS ligadas ao mesmo tempo (é
+//   produção de verdade, mas ainda é uma demonstração). Um cliente real
+//   futuro rodaria com IS_PRODUCTION=true e DEMO_MODE=false.
+const IS_PRODUCTION = process.env.NODE_ENV === "production";
+const DEMO_MODE = process.env.DEMO_MODE !== "false"; // padrão: ligado, a não ser que seja desligado explicitamente
+
+if (IS_PRODUCTION) {
   if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET.length < 32) {
     console.error("SESSION_SECRET ausente ou curto demais (mínimo 32 caracteres). Recusando iniciar em produção.");
     process.exit(1);
   }
-  app.set("trust proxy", 1);
+  app.set("trust proxy", 1); // confia no HTTPS terminado pelo proxy da hospedagem (Render)
 }
 
 app.use(express.urlencoded({ extended: false }));
@@ -117,9 +128,10 @@ app.use(
     secret: process.env.SESSION_SECRET || "dev-secret-nao-usar-em-producao",
     resave: false,
     saveUninitialized: false,
-    cookie: { httpOnly: true, sameSite: "lax", secure: !IS_DEV, maxAge: 7 * 24 * 60 * 60 * 1000 },
+    cookie: { httpOnly: true, sameSite: "lax", secure: IS_PRODUCTION, maxAge: 7 * 24 * 60 * 60 * 1000 },
   })
 );
+app.use(csrfMiddleware);
 
 /** URL pública base (para montar links de convite/redefinição), respeitando o proxy em produção. */
 function publicBaseUrl(req: express.Request): string {
@@ -235,19 +247,31 @@ app.get("/login", (req, res) => {
 
 app.post("/login", async (req, res) => {
   const { email, password } = req.body as { email?: string; password?: string };
+  const ip = clientIp(req);
+
+  const throttle = email ? checkLoginThrottle(ip, email) : { locked: false };
+  if (throttle.locked) {
+    await audit("login_bloqueado", { detail: `e-mail: ${email!.trim().slice(0, 120)}, aguardar ${throttle.retryAfterMinutes} min`, ip });
+    res.status(429).send(loginPage(`Muitas tentativas com este e-mail. Tente de novo em ${throttle.retryAfterMinutes} minuto(s).`));
+    return;
+  }
+
   const user = email ? (await findUserByEmail(email.trim().toLowerCase())) ?? (await findUserByEmail(email.trim())) : undefined;
   if (!user || !password || !verifyPassword(password, user.password_hash) || !user.active) {
-    await audit("login_falhou", { userId: user?.id ?? null, detail: email ? `e-mail: ${email.trim().slice(0, 120)}` : undefined, ip: clientIp(req) });
+    if (email) recordLoginFailure(ip, email);
+    await audit("login_falhou", { userId: user?.id ?? null, detail: email ? `e-mail: ${email.trim().slice(0, 120)}` : undefined, ip });
     res.status(401).send(loginPage("E-mail ou senha inválidos."));
     return;
   }
+
+  if (email) clearLoginThrottle(ip, email);
   req.session.regenerate((err) => {
     if (err) {
       res.status(500).send(loginPage("Erro ao iniciar sessão. Tente novamente."));
       return;
     }
     req.session.userId = user.id;
-    audit("login_ok", { userId: user.id, ip: clientIp(req) }).catch((e) => console.error("[audit]", e));
+    audit("login_ok", { userId: user.id, ip }).catch((e) => console.error("[audit]", e));
     res.redirect("/");
   });
 });
@@ -431,12 +455,12 @@ app.post("/admin/usuarios/:userId/ativo", requirePlatformAdmin, async (req, res)
 app.get("/empresa/:companyId/conversas", requireCompanyAccess, async (_req, res) => {
   const items = await listConversations(res.locals.company.id);
   res.send(
-    inboxPage({ company: res.locals.company, user: res.locals.user, role: res.locals.membership.role, items, isDev: IS_DEV })
+    inboxPage({ company: res.locals.company, user: res.locals.user, role: res.locals.membership.role, items, isDev: DEMO_MODE })
   );
 });
 
 app.post("/empresa/:companyId/conversas/nova", requireCompanyAccess, async (req, res) => {
-  if (!IS_DEV) {
+  if (!DEMO_MODE) {
     res.status(404).send("Não encontrado.");
     return;
   }
@@ -485,7 +509,7 @@ app.get("/empresa/:companyId/conversas/:conversationId", requireCompanyAccess, a
       wait,
       episodes: await listWaitEpisodes(conv.id),
       assignedUserName: assignedUser?.name ?? null,
-      isDev: IS_DEV,
+      isDev: DEMO_MODE,
     })
   );
 });
@@ -533,7 +557,7 @@ app.post("/empresa/:companyId/conversas/:conversationId/responder", requireCompa
       else console.log(`[whatsapp] resposta enviada (conversa ${conv.id}, atendente ${res.locals.user.id}, wamid ${waMessageId}).`);
     }
   } else {
-    sendStatus = IS_DEV && simular_falha === "1" ? "FALHOU" : "ENVIADA";
+    sendStatus = DEMO_MODE && simular_falha === "1" ? "FALHOU" : "ENVIADA";
   }
 
   // O atendente autenticado (author_user_id) e o resultado do envio (send_status)
@@ -552,7 +576,7 @@ app.post("/empresa/:companyId/conversas/:conversationId/responder", requireCompa
 });
 
 app.post("/empresa/:companyId/conversas/:conversationId/simular/cliente", requireCompanyAccess, async (req, res) => {
-  if (!IS_DEV) {
+  if (!DEMO_MODE) {
     res.status(404).send("Não encontrado.");
     return;
   }
@@ -566,7 +590,7 @@ app.post("/empresa/:companyId/conversas/:conversationId/simular/cliente", requir
 });
 
 app.post("/empresa/:companyId/conversas/:conversationId/simular/pedir-humano", requireCompanyAccess, async (req, res) => {
-  if (!IS_DEV) {
+  if (!DEMO_MODE) {
     res.status(404).send("Não encontrado.");
     return;
   }
@@ -591,7 +615,7 @@ export const ROBO_TRANSFERENCIA_TEXTO =
   'Por favor aguarde, estou chamando um atendente humano para te ajudar!!\nAtenção: pode demorar alguns minutos.';
 
 app.post("/empresa/:companyId/conversas/:conversationId/simular/robo/menu", requireCompanyAccess, async (req, res) => {
-  if (!IS_DEV) {
+  if (!DEMO_MODE) {
     res.status(404).send("Não encontrado.");
     return;
   }
@@ -602,7 +626,7 @@ app.post("/empresa/:companyId/conversas/:conversationId/simular/robo/menu", requ
 });
 
 app.post("/empresa/:companyId/conversas/:conversationId/simular/robo/transferencia", requireCompanyAccess, async (req, res) => {
-  if (!IS_DEV) {
+  if (!DEMO_MODE) {
     res.status(404).send("Não encontrado.");
     return;
   }
@@ -613,7 +637,7 @@ app.post("/empresa/:companyId/conversas/:conversationId/simular/robo/transferenc
 });
 
 app.post("/empresa/:companyId/conversas/:conversationId/simular/robo", requireCompanyAccess, async (req, res) => {
-  if (!IS_DEV) {
+  if (!DEMO_MODE) {
     res.status(404).send("Não encontrado.");
     return;
   }
@@ -944,7 +968,7 @@ app.get("/empresa/:companyId/dashboard", requireCompanyAccess, async (req, res) 
       company,
       user: res.locals.user,
       role: res.locals.membership.role,
-      isDev: IS_DEV,
+      isDev: DEMO_MODE,
       canEditSla: res.locals.membership.role === "COMPANY_ADMIN",
       members: await listCompanyMembers(company.id),
       filters: { from, to, attendantUserId },

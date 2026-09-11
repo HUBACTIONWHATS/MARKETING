@@ -418,3 +418,37 @@ O usuário criou a conta/projeto na Neon e salvou `DATABASE_URL` no `.env` local
 
 - Render não configurado (aguardando confirmação). Número comercial, recebimento/envio reais e robô: pendentes.
 - `embedded-postgres` é dependência de desenvolvimento (~binários do Postgres baixados no `npm install`); não vai para produção.
+
+## Etapa concluída: Etapa 10 — Preparação do Render (segurança + arquivos), aguardando repositório remoto
+
+Pedido pelo usuário: preparar o Render para demonstração externa, com checklist de segurança específico e sem publicar nada até confirmação. **Nada foi criado no Render, nenhum plano pago foi ativado, nada foi publicado.**
+
+### Decisões e o que foi implementado
+
+- **`IS_PRODUCTION` separado de `DEMO_MODE`** ([src/server.ts](src/server.ts), [src/views.ts](src/views.ts)): antes uma única flag (`IS_DEV`, derivada de `NODE_ENV`) controlava ao mesmo tempo a segurança e a visibilidade do banner/simulador — impossível ter as duas coisas religadas junto no piloto. Agora `IS_PRODUCTION = NODE_ENV === "production"` (segurança: exige `SESSION_SECRET` ≥ 32, `trust proxy`, cookie `secure`) e `DEMO_MODE` (banner e simulador, ligado por padrão, só desliga com `DEMO_MODE=false`) são independentes. O piloto no Render sobe com as duas ligadas ao mesmo tempo.
+- **CSRF** ([src/csrf.ts](src/csrf.ts)): token por sessão (`crypto.randomBytes`), exigido em todo `POST`; injetado automaticamente em qualquer resposta HTML que contenha `<form method="post"` (um monkey-patch em `res.send`) — nenhuma das ~28 views precisou ser editada individualmente. Rota do webhook do WhatsApp isenta (não é formulário, é chamado pela Meta).
+- **Limite de tentativas de login** ([src/loginThrottle.ts](src/loginThrottle.ts)): 5 tentativas erradas por `ip::email` em 15 min bloqueiam por 15 min, em memória (varredura periódica própria); bloqueio gera evento `login_bloqueado` no log de auditoria.
+- **Seed com senhas seguras** ([src/seed.ts](src/seed.ts), reescrito): nunca apaga nem recria nada — só cria conta se o e-mail não existir; conta já existente não tem a senha tocada. No SQLite local a senha continua fixa (`trocar123`); no Postgres (potencialmente remoto/público) gera uma senha aleatória por conta, mostrada só uma vez no terminal, ou aceita ser escolhida por variável de ambiente (`PLATFORM_ADMIN_PASSWORD`, `DEMO_A_ADMIN_PASSWORD`, `DEMO_A_AGENT_PASSWORD`, `DEMO_B_ADMIN_PASSWORD`, `DEMO_B_AGENT_PASSWORD`). Guarda de bloqueio trocada de `NODE_ENV=production` para `DEMO_MODE=false` (coerente com a separação acima).
+- **Higiene de dependências para o build do Render**: `better-sqlite3` movido de `dependencies` para `optionalDependencies` em [package.json](package.json) (só é usado quando não há `DATABASE_URL`; no Render nunca é `require`'d, e assim uma eventual falha de compilação do módulo nativo não derruba o `npm install`); `engines.node` fixado em `>=20.0.0`.
+- **[render.yaml](render.yaml)** (novo, Blueprint do Render): `plan: free`, `buildCommand: npm install --include=dev && npm run build` (o `--include=dev` evita que `NODE_ENV=production` durante o `npm install` pule as `devDependencies`, onde está o `typescript` do build), `startCommand: npm start`, `healthCheckPath: /health`, variáveis incluindo `SESSION_SECRET` com `generateValue: true` (o Render gera sozinho, nunca digitado por ninguém) e `DATABASE_URL`/tipo `sync: false` (nunca gravada no arquivo, preenchida manualmente no painel).
+- **Verificado: `.env` nunca foi commitado** — está no `.gitignore` desde o início; só `.env.example` (sem valores) está no repositório.
+
+### Verificado
+
+- `npx tsc --noEmit` limpo. `npm test` (SQLite): 58/58.
+- CSRF e cookie seguro testados simulando exatamente as condições do Render: `NODE_ENV=production DEMO_MODE=true` + cabeçalho `X-Forwarded-Proto: https` (o `trust proxy` faz o Express reconhecer o HTTPS do proxy do Render) — formulário sem token ou com token errado é bloqueado (403); com token certo, passa; cookie sai `secure`.
+- Rate limit de login testado: 5ª tentativa errada bloqueia por 15 min e gera `login_bloqueado` no log de auditoria; `clearLoginThrottle` libera no acerto.
+- Seed testado no SQLite local (com `.env` temporariamente renomeado para garantir que não tocaria a Neon de verdade): conta nova mostra senha uma vez, conta existente não tem senha alterada, reexecução é segura.
+- Build real (`npm run build && npm start`) exercitado contra a Neon depois da reorganização de dependências — sobe normalmente.
+- `npm install` após mover `better-sqlite3` para `optionalDependencies`: `package-lock.json` regenerado, sem quebra.
+- Confirmado com `git remote -v`: **não existe repositório remoto configurado** (só local, branch `master`, com commits).
+
+### Depende de você (próxima ação, uma de cada vez)
+
+1. **Criar um repositório no GitHub** (recomendo privado, já que o código terá lógica de negócio) para o Render poder implantar a partir dele. Ainda não crie o Web Service no Render — esse é o passo seguinte, depois que o código estiver lá.
+
+### Pendências reais
+
+- Repositório remoto: não existe (ação acima).
+- Render: nenhuma conta/serviço criado (aguardando repositório remoto e sua confirmação final para publicar).
+- Número comercial, recebimento/envio reais e robô: pendentes, como já declarado nas telas.

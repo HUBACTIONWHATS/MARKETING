@@ -1,0 +1,29 @@
+# Blueprint do Render (https://render.com/docs/blueprint-spec) — atalho para
+# criar o serviço já com os comandos e variáveis corretas. Ao importar este
+# arquivo, o Render pede para você preencher DATABASE_URL manualmente (nunca
+# fica neste arquivo, que é público no repositório). Se a importação do
+# Blueprint der qualquer problema, os mesmos valores podem ser digitados à
+# mão na tela de criação do Web Service — ver PUBLICACAO.md.
+#
+# --include=dev no build: sem isso, algumas versões do npm pulam as
+# devDependencies quando NODE_ENV=production está definido — e o build
+# (tsc) precisa do TypeScript, que é uma devDependency.
+services:
+  - type: web
+    name: hub-action-crm-demo
+    runtime: node
+    plan: free
+    buildCommand: npm install --include=dev && npm run build
+    startCommand: npm start
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DEMO_MODE
+        value: "true"
+      - key: SESSION_SECRET
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: DATABASE_SSL
+        value: require

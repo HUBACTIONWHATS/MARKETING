@@ -621,7 +621,10 @@ export function appShell(opts: {
   );
 }
 
-const IS_DEMO = process.env.NODE_ENV !== "production";
+// Independente de NODE_ENV: o piloto no Render roda com NODE_ENV=production
+// (segurança ligada) e DEMO_MODE=true (banner/simulador ligados) ao mesmo
+// tempo — ver a explicação completa em server.ts, perto de IS_PRODUCTION.
+const IS_DEMO = process.env.DEMO_MODE !== "false";
 
 export function emptyState(title: string, description: string): string {
   return `<div class="empty-state">
