@@ -13,7 +13,9 @@ import {
   listPendingInvites,
 } from "./access";
 import { requireAuth, requireCompanyAccess, requirePlatformAdmin, verifyPassword } from "./auth";
+import { checkActionThrottle, recordAction } from "./actionThrottle";
 import { csrfMiddleware } from "./csrf";
+import { decryptSecret } from "./credentialCrypto";
 import { checkLoginThrottle, clearLoginThrottle, recordLoginFailure } from "./loginThrottle";
 import { SqliteSessionStore } from "./sessionStore";
 import {
@@ -66,15 +68,22 @@ import {
   type Role,
 } from "./models";
 import {
+  activateConnection,
   buildConnectionStatusReport,
+  createCompanyConnection,
+  deactivateConnection,
+  findConnectionByCompanyId,
   findConnectionByPhoneNumberId,
   getWhatsappCredentials,
   listConnectionsForCompany,
   parseWebhookPayload,
-  recordVerification,
+  replaceConnectionToken,
+  subscribeAppToWaba,
+  testCompanyConnection,
+  toAdminViewModel,
   sendWhatsAppMessage,
-  verifyPhoneNumberConnection,
   verifyWebhookSignature,
+  type WhatsappEnvironment,
 } from "./whatsapp";
 import {
   adminPage,
@@ -93,6 +102,7 @@ import {
   loginPage,
   noCompanyPage,
   settingsPage,
+  whatsappAdminPage,
 } from "./views";
 
 const app = express();
@@ -378,6 +388,177 @@ app.get("/admin/log", requirePlatformAdmin, async (_req, res) => {
   res.send(auditLogPage(await listAuditEntries(200), "/admin"));
 });
 
+// --- Conexões do WhatsApp: área exclusiva do administrador geral -----------
+// Só requirePlatformAdmin (nunca administrador de empresa nem atendente).
+// Cada rota audita quem fez o quê, sem nunca gravar o segredo — ver access.ts.
+
+async function renderWhatsappAdmin(res: express.Response, extra: { notice?: string; error?: string } = {}, publicBaseUrlValue?: string): Promise<void> {
+  const companies = await listCompaniesForAdmin();
+  const connections = new Map(
+    (
+      await Promise.all(
+        companies.map(async (c) => {
+          const row = await findConnectionByCompanyId(c.id);
+          return [c.id, row ? toAdminViewModel(row) : null] as const;
+        })
+      )
+    ).filter(([, v]) => v !== null)
+  );
+  res.send(
+    whatsappAdminPage({
+      companies,
+      connections,
+      graphApiVersion: getWhatsappCredentials().graphApiVersion,
+      webhookUrl: `${publicBaseUrlValue ?? process.env.PUBLIC_BASE_URL ?? ""}/webhooks/whatsapp`,
+      verifyTokenConfigured: !!getWhatsappCredentials().verifyToken,
+      appSecretConfigured: !!getWhatsappCredentials().appSecret,
+      ...extra,
+    })
+  );
+}
+
+app.get("/admin/whatsapp", requirePlatformAdmin, async (req, res) => renderWhatsappAdmin(res, {}, publicBaseUrl(req)));
+
+app.post("/admin/whatsapp/:companyId/cadastrar", requirePlatformAdmin, async (req, res) => {
+  const companyId = Number(req.params.companyId);
+  const company = await findCompanyById(companyId);
+  const { waba_id, phone_number_id, access_token, environment } = req.body as {
+    waba_id?: string;
+    phone_number_id?: string;
+    access_token?: string;
+    environment?: string;
+  };
+  if (!company) {
+    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." }, publicBaseUrl(req));
+    return;
+  }
+  const env: WhatsappEnvironment = environment === "PRODUCAO" ? "PRODUCAO" : "TESTE";
+  const result = await createCompanyConnection(companyId, {
+    wabaId: waba_id ?? "",
+    phoneNumberId: phone_number_id ?? "",
+    accessToken: access_token ?? "",
+    environment: env,
+  });
+  await audit("whatsapp_credencial_cadastrada", {
+    companyId,
+    userId: res.locals.user.id,
+    detail: result.ok ? `WABA ${waba_id}, ambiente ${env}` : `falhou: ${result.error}`,
+    ip: clientIp(req),
+  });
+  await renderWhatsappAdmin(
+    res,
+    result.ok ? { notice: `Conexão cadastrada para "${company.name}". Use "Testar conexão" antes de ativar.` } : { error: result.error },
+    publicBaseUrl(req)
+  );
+});
+
+app.post("/admin/whatsapp/:companyId/substituir-token", requirePlatformAdmin, async (req, res) => {
+  const companyId = Number(req.params.companyId);
+  const company = await findCompanyById(companyId);
+  const { access_token } = req.body as { access_token?: string };
+  if (!company) {
+    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." }, publicBaseUrl(req));
+    return;
+  }
+  const result = await replaceConnectionToken(companyId, access_token ?? "");
+  await audit("whatsapp_credencial_substituida", {
+    companyId,
+    userId: res.locals.user.id,
+    detail: result.ok ? "token substituído" : `falhou: ${result.error}`,
+    ip: clientIp(req),
+  });
+  await renderWhatsappAdmin(
+    res,
+    result.ok
+      ? { notice: `Credencial de "${company.name}" substituída. A conexão foi desativada até um novo teste confirmar o token.` }
+      : { error: result.error },
+    publicBaseUrl(req)
+  );
+});
+
+app.post("/admin/whatsapp/:companyId/testar", requirePlatformAdmin, async (req, res) => {
+  const companyId = Number(req.params.companyId);
+  const company = await findCompanyById(companyId);
+  if (!company) {
+    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." }, publicBaseUrl(req));
+    return;
+  }
+  const throttle = checkActionThrottle("whatsapp_testar", clientIp(req), companyId, 20);
+  if (!throttle.allowed) {
+    await renderWhatsappAdmin(res, { error: `Muitos testes seguidos. Tente de novo em ${throttle.retryAfterMinutes} minuto(s).` }, publicBaseUrl(req));
+    return;
+  }
+  recordAction("whatsapp_testar", clientIp(req), companyId);
+  const result = await testCompanyConnection(companyId, getWhatsappCredentials().graphApiVersion);
+  await audit("whatsapp_conexao_testada", {
+    companyId,
+    userId: res.locals.user.id,
+    detail: result.ok ? `sucesso: ${result.detail}` : `falhou: ${result.detail}`,
+    ip: clientIp(req),
+  });
+  await renderWhatsappAdmin(
+    res,
+    result.ok ? { notice: `Teste de "${company.name}": ${result.detail}` } : { error: `Teste de "${company.name}" falhou: ${result.detail}` },
+    publicBaseUrl(req)
+  );
+});
+
+app.post("/admin/whatsapp/:companyId/ativar", requirePlatformAdmin, async (req, res) => {
+  const companyId = Number(req.params.companyId);
+  const company = await findCompanyById(companyId);
+  if (!company) {
+    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." }, publicBaseUrl(req));
+    return;
+  }
+  const result = await activateConnection(companyId);
+  await audit("whatsapp_conexao_ativada", { companyId, userId: res.locals.user.id, detail: result.ok ? "ativada" : `falhou: ${result.error}`, ip: clientIp(req) });
+  await renderWhatsappAdmin(res, result.ok ? { notice: `Conexão de "${company.name}" ativada.` } : { error: result.error }, publicBaseUrl(req));
+});
+
+app.post("/admin/whatsapp/:companyId/desativar", requirePlatformAdmin, async (req, res) => {
+  const companyId = Number(req.params.companyId);
+  const company = await findCompanyById(companyId);
+  if (!company) {
+    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." }, publicBaseUrl(req));
+    return;
+  }
+  const result = await deactivateConnection(companyId);
+  await audit("whatsapp_conexao_desativada", { companyId, userId: res.locals.user.id, detail: result.ok ? "desativada" : `falhou: ${result.error}`, ip: clientIp(req) });
+  await renderWhatsappAdmin(res, result.ok ? { notice: `Conexão de "${company.name}" desativada.` } : { error: result.error }, publicBaseUrl(req));
+});
+
+app.post("/admin/whatsapp/:companyId/assinar-webhook", requirePlatformAdmin, async (req, res) => {
+  const companyId = Number(req.params.companyId);
+  const company = await findCompanyById(companyId);
+  const { confirmar } = req.body as { confirmar?: string };
+  if (!company) {
+    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." }, publicBaseUrl(req));
+    return;
+  }
+  if (confirmar !== "1") {
+    await renderWhatsappAdmin(res, { error: "Confirme a caixa de seleção para assinar o aplicativo no WABA." }, publicBaseUrl(req));
+    return;
+  }
+  const throttle = checkActionThrottle("whatsapp_assinar", clientIp(req), companyId, 10);
+  if (!throttle.allowed) {
+    await renderWhatsappAdmin(res, { error: `Muitas tentativas seguidas. Tente de novo em ${throttle.retryAfterMinutes} minuto(s).` }, publicBaseUrl(req));
+    return;
+  }
+  recordAction("whatsapp_assinar", clientIp(req), companyId);
+  const result = await subscribeAppToWaba(companyId, getWhatsappCredentials().graphApiVersion);
+  await audit("whatsapp_app_assinado_waba", {
+    companyId,
+    userId: res.locals.user.id,
+    detail: result.ok ? "assinado" : `falhou: ${result.detail}`,
+    ip: clientIp(req),
+  });
+  await renderWhatsappAdmin(
+    res,
+    result.ok ? { notice: `"${company.name}": ${result.detail}` } : { error: `"${company.name}": ${result.detail}` },
+    publicBaseUrl(req)
+  );
+});
+
 app.post("/admin/empresas", requirePlatformAdmin, async (req, res) => {
   const { name } = req.body as { name?: string };
   if (!name || !name.trim()) {
@@ -546,11 +727,17 @@ app.post("/empresa/:companyId/conversas/:conversationId/responder", requireCompa
     const connections = await listConnectionsForCompany(company.id);
     const connection = connections.find((c) => c.active);
     const contact = await getContact(company.id, conv.contact_id);
+    let accessToken: string | undefined;
+    try {
+      accessToken = connection?.access_token_encrypted ? decryptSecret(connection.access_token_encrypted) : undefined;
+    } catch {
+      accessToken = undefined; // token salvo não decifra (chave trocada?) — trata como ausente, nunca quebra o envio de forma confusa
+    }
     if (!connection || !contact) {
       sendStatus = "FALHOU";
       console.error(`[whatsapp] envio recusado: conexão ou contato ausente (empresa ${company.id}, conversa ${conv.id})`);
     } else {
-      const result = await sendWhatsAppMessage(connection.phone_number_id, contact.phone, body);
+      const result = await sendWhatsAppMessage(accessToken, connection.phone_number_id, contact.phone, body, getWhatsappCredentials().graphApiVersion);
       sendStatus = result.ok ? "ENVIADA" : "FALHOU";
       waMessageId = result.waMessageId ?? null;
       if (!result.ok) console.error(`[whatsapp] falha ao enviar (conversa ${conv.id}): ${result.error}`);
@@ -792,38 +979,10 @@ app.post("/empresa/:companyId/configuracoes", requireCompanyAccess, async (req, 
   );
 });
 
-app.post("/empresa/:companyId/configuracoes/whatsapp/verificar", requireCompanyAccess, async (req, res) => {
-  const company = res.locals.company;
-  if (res.locals.membership.role !== "COMPANY_ADMIN") {
-    res.status(403).send("Apenas o administrador da empresa pode verificar a conexão.");
-    return;
-  }
-  const connection = (await listConnectionsForCompany(company.id)).find((c) => c.active === 1);
-  let whatsappVerifySuccess: string | undefined;
-  let whatsappVerifyError: string | undefined;
-  if (!connection) {
-    whatsappVerifyError = "Nenhum número associado a esta empresa para verificar.";
-  } else {
-    const result = await verifyPhoneNumberConnection(connection.phone_number_id);
-    await recordVerification(connection.phone_number_id, result);
-    if (result.ok) whatsappVerifySuccess = result.detail;
-    else whatsappVerifyError = result.detail;
-  }
-
-  res.send(
-    settingsPage({
-      company,
-      user: res.locals.user,
-      role: res.locals.membership.role,
-      canEdit: true,
-      hours: parseBusinessHours(company.business_hours),
-      whatsapp: await buildConnectionStatusReport(company.id),
-      team: await teamData(res),
-      whatsappVerifySuccess,
-      whatsappVerifyError,
-    })
-  );
-});
+// A validação real da conexão (chamar a Meta) é exclusiva do administrador
+// geral — ver /admin/whatsapp/:companyId/testar. O administrador da empresa
+// só visualiza o status (settingsPage, mais acima) — não existe mais rota de
+// "verificar" aqui de propósito (ver ACESSO E ISOLAMENTO no pedido da etapa).
 
 // --- CRM: funil configurável, separado de contato --------------------------
 

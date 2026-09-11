@@ -96,7 +96,8 @@ Variáveis de ambiente (nunca no código, nunca no Git):
 | `DATABASE_URL` | Sim (piloto) | Connection string da Neon (`postgresql://...`). Sem ela, a aplicação usa SQLite local |
 | `DATABASE_SSL` | Não | `require` (padrão fora de localhost); `no-verify` só se o certificado falhar; `disable` só para Postgres local |
 | `DATABASE_FILE` | Só sem `DATABASE_URL` | Caminho do arquivo SQLite (desenvolvimento) |
-| `WHATSAPP_*` | Não (piloto demo) | Só quando for conectar número real — ver CONEXAO_WHATSAPP.md |
+| `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET`, `WHATSAPP_GRAPH_API_VERSION` | Não (piloto demo) | Globais do servidor (um webhook para todas as empresas) — só quando for conectar número real, ver CONEXAO_WHATSAPP.md |
+| `CREDENTIAL_ENCRYPTION_KEY` | Não (só quando cadastrar alguma conexão) | Cifra o Access Token de cada empresa antes de gravar no banco — gere com `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Sem ela, a tela `/admin/whatsapp` não cadastra nem lê nenhuma credencial |
 
 **Piloto de demonstração em produção**: o piloto no Render sobe com `NODE_ENV=production` (segurança de verdade: `SESSION_SECRET` obrigatório, cookie seguro, CSRF, limite de tentativas de login) **e** `DEMO_MODE` ligado (banner amarelo e simulador continuam visíveis, deixando claro que é demonstração) ao mesmo tempo — as duas coisas não competem mais entre si.
 
@@ -117,12 +118,12 @@ Primeiro acesso da Hub Action: crie o administrador da plataforma com o seed **o
 - Senhas com bcrypt; tokens de convite/redefinição guardados como SHA-256, uso único, com validade; redefinir senha ou desativar usuário derruba as sessões dele.
 - Cookie de sessão `httpOnly` + `sameSite=lax` (+ `secure` em produção); sessões no banco.
 - Webhook do WhatsApp com assinatura HMAC obrigatória e deduplicação.
-- Log de auditoria (`/admin/log`): login ok/falha, convites, redefinições, planos, ativação/desativação.
+- Log de auditoria (`/admin/log`): login ok/falha, convites, redefinições, planos, ativação/desativação, cadastro/teste/ativação/desativação/substituição de conexão do WhatsApp (nunca com o segredo).
 - Consultas SQL parametrizadas em todo o código.
+- Proteção CSRF (token por sessão em todo formulário) e limite de tentativas de login (5 por e-mail+IP a cada 15 min).
+- **Credenciais do WhatsApp por empresa, cifradas** (Access Token com AES-256-GCM, chave `CREDENTIAL_ENCRYPTION_KEY` só no servidor, nunca em texto puro no banco nem de volta no navegador): cadastro/teste/ativação exclusivos do administrador geral (`/admin/whatsapp`); administrador da empresa só vê status; atendente não acessa nada disso — isolamento entre empresas testado (uma não vê nem altera a conexão da outra).
 
-- Proteção CSRF (token por sessão em todo formulário) e limite de tentativas de login (5 por e-mail+IP a cada 15 min) — implementados nesta etapa, ver seção 2.
-
-**Lacunas conhecidas (não corrigidas nesta etapa, para decisão sua):** credenciais do WhatsApp são globais do servidor (um número real por instalação, não por empresa); sem 2FA.
+**Lacunas conhecidas (não corrigidas nesta etapa, para decisão sua):** sem 2FA.
 
 ## 6. Roteiro de publicação (quando você autorizar)
 

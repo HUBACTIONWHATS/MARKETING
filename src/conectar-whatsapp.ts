@@ -1,7 +1,11 @@
 /**
- * Associa um número real do WhatsApp (phone_number_id da Cloud API) a uma
- * empresa do Hub Action. Uso administrativo, rodado por quem tem acesso ao
- * servidor — não existe tela para isso ainda (ver CONEXAO_WHATSAPP.md).
+ * Atalho de linha de comando, só para desenvolvimento/demonstração local:
+ * associa um phone_number_id a uma empresa SEM Access Token (não cifra nada).
+ * Uso real, com credencial de verdade, é pela tela administrativa segura
+ * (/admin/whatsapp, exclusiva do administrador geral) — ver
+ * createCompanyConnection em whatsapp.ts e o passo a passo em
+ * CONEXAO_WHATSAPP.md. Continua existindo porque é uma forma rápida de testar
+ * o roteamento do webhook sem preencher credencial nenhuma.
  *
  * Uso:
  *   npx tsx src/conectar-whatsapp.ts <slug-da-empresa> <phone_number_id> [teste|producao] [waba_id] [numero_exibido]
@@ -42,9 +46,10 @@ async function main(): Promise<void> {
   console.log(
     `OK: phone_number_id ${phoneNumberId} associado à empresa "${company.name}" (id ${company.id}), ambiente ${environment}.`
   );
-  console.log("Lembrete: isso só faz efeito de verdade se WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET e");
-  console.log("WHATSAPP_ACCESS_TOKEN também estiverem configurados no .env e o webhook cadastrado no Meta for Developers.");
-  console.log('Na tela Configurações → Conexão do WhatsApp, use "Verificar agora" para confirmar de verdade com a Meta.');
+  console.log("Lembrete: isso só cadastra o roteamento do webhook (sem Access Token, sem cifrar nada).");
+  console.log("Para uma conexão de verdade (com token, validada e ativável), use a tela /admin/whatsapp,");
+  console.log("exclusiva do administrador geral — ela também exige WHATSAPP_VERIFY_TOKEN, WHATSAPP_APP_SECRET");
+  console.log("e CREDENTIAL_ENCRYPTION_KEY configurados no .env do servidor.");
   await db.close();
 }
 

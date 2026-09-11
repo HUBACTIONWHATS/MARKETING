@@ -10,7 +10,7 @@ import type {
 } from "./attendance";
 import type { BusinessHours, WeekdayKey } from "./businessHours";
 import type { OpportunityWithDetails, PipelineStage } from "./crm";
-import type { ConnectionStatusReport } from "./whatsapp";
+import { STATUS_LABELS, type ConnectionAdminView, type ConnectionStatusReport } from "./whatsapp";
 import type { DashboardData, DashboardFilters } from "./dashboard";
 import type { AuditEntry } from "./access";
 import type { Company, CompanyAdminRow, CompanyPlan, CompanyUserRow, MembershipWithCompany, Role, User } from "./models";
@@ -524,6 +524,7 @@ export function adminPage(opts: {
       <div class="toolbar">
         <h2 style="margin:0">Painel da Hub Action</h2>
         <div style="display:flex;gap:0.5rem">
+          <a href="/admin/whatsapp" class="btn btn-small">Conexões do WhatsApp</a>
           <a href="/admin/log" class="btn btn-small">Log de auditoria</a>
           <form method="post" action="/logout"><button type="submit" class="btn btn-small">Sair</button></form>
         </div>
@@ -561,6 +562,147 @@ export function auditLogPage(entries: AuditEntry[], backHref: string): string {
         <thead><tr><th>Quando</th><th>Ação</th><th>Empresa</th><th>Usuário</th><th>Detalhe</th></tr></thead>
         <tbody>${rows || '<tr><td colspan="5" class="meta">Nada registrado ainda.</td></tr>'}</tbody>
       </table></div>
+    </div>`
+  );
+}
+
+const CONNECTION_STATUS_BADGE: Record<string, string> = {
+  CONECTADO: "badge-humano",
+  ERRO: "badge-encerrado",
+  DESATIVADO: "badge-encerrado",
+  PENDENTE: "badge-aguardando",
+  EM_VALIDACAO: "badge-aguardando",
+};
+
+const fmtDateTime = (iso: string) =>
+  new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
+
+/**
+ * Um painel por empresa: cadastro inicial (se ainda não existe conexão) ou
+ * gerenciamento completo (testar/ativar/desativar/substituir credencial/
+ * assinar webhook) — sempre com CSRF automático (form method="post") e
+ * auditado pelo servidor. O Access Token NUNCA aparece aqui — só um badge de
+ * "configurado" e um campo em branco para digitar um NOVO valor.
+ */
+function whatsappAdminCompanyPanel(company: CompanyAdminRow, connection: ConnectionAdminView | null): string {
+  const base = `/admin/whatsapp/${company.id}`;
+
+  if (!connection) {
+    return `<div class="panel">
+      <div class="toolbar" style="margin-bottom:0.5rem">
+        <h3 style="text-transform:none;color:#f8fafc;font-size:1rem;margin:0">${escapeHtml(company.name)}</h3>
+        <span class="badge badge-aguardando">Sem conexão cadastrada</span>
+      </div>
+      <form method="post" action="${base}/cadastrar" class="form-grid">
+        <label>WABA ID<input type="text" name="waba_id" required /></label>
+        <label>Phone Number ID<input type="text" name="phone_number_id" required /></label>
+        <label>Ambiente
+          <select name="environment"><option value="TESTE">Teste</option><option value="PRODUCAO">Produção</option></select>
+        </label>
+        <label>Access Token<input type="password" name="access_token" autocomplete="off" required /></label>
+        <div style="align-self:end"><button type="submit" class="btn btn-small btn-primary">Cadastrar conexão</button></div>
+      </form>
+    </div>`;
+  }
+
+  const statusBadge = CONNECTION_STATUS_BADGE[connection.status] ?? "badge-aguardando";
+  const canActivate = connection.status !== "CONECTADO";
+  const canDeactivate = connection.active === 1;
+
+  return `<div class="panel">
+    <div class="toolbar" style="margin-bottom:0.5rem">
+      <h3 style="text-transform:none;color:#f8fafc;font-size:1rem;margin:0">${escapeHtml(company.name)}</h3>
+      <div style="display:flex;gap:0.4rem;flex-wrap:wrap">
+        <span class="badge">${MODE_LABELS[connection.environment]}</span>
+        <span class="badge ${statusBadge}">${escapeHtml(STATUS_LABELS[connection.status])}</span>
+      </div>
+    </div>
+
+    <ul class="list" style="margin-bottom:0.75rem">
+      <li><span>WABA ID</span> <span>${escapeHtml(connection.waba_id ?? "—")}</span></li>
+      <li><span>Phone Number ID</span> <span>${escapeHtml(connection.phone_number_id)}</span></li>
+      <li><span>Número confirmado pela Meta</span> <span>${connection.display_phone_number ? escapeHtml(connection.display_phone_number) : "ainda não confirmado"}</span></li>
+      <li><span>Nome de exibição confirmado</span> <span>${connection.verified_name ? escapeHtml(connection.verified_name) : "ainda não confirmado"}</span></li>
+      <li><span>Qualidade (Meta)</span> <span>${connection.quality_rating ? escapeHtml(connection.quality_rating) : "—"}</span></li>
+      <li><span>Access Token</span> <span class="badge ${connection.hasAccessToken ? "badge-humano" : "badge-encerrado"}">${connection.hasAccessToken ? "configurado" : "não configurado"}</span></li>
+      <li><span>Última validação</span> <span>${connection.last_verified_at ? fmtDateTime(connection.last_verified_at) : "nunca"}</span></li>
+      ${connection.last_verified_ok === 0 ? `<li><span>Último erro</span> <span class="error" style="margin:0">${escapeHtml(connection.last_verified_detail ?? "sem detalhes")}</span></li>` : ""}
+    </ul>
+
+    <div style="display:flex;gap:0.5rem;flex-wrap:wrap;margin-bottom:0.75rem">
+      <form method="post" action="${base}/testar" style="display:inline"><button type="submit" class="btn btn-small">Testar conexão</button></form>
+      ${canActivate ? `<form method="post" action="${base}/ativar" style="display:inline"><button type="submit" class="btn btn-small btn-primary">Ativar</button></form>` : ""}
+      ${canDeactivate ? `<form method="post" action="${base}/desativar" style="display:inline"><button type="submit" class="btn btn-small btn-danger">Desativar</button></form>` : ""}
+    </div>
+
+    <details style="margin-bottom:0.75rem">
+      <summary class="btn btn-small" style="display:inline-block;cursor:pointer">Substituir credencial</summary>
+      <form method="post" action="${base}/substituir-token" class="form-grid" style="margin-top:0.6rem">
+        <label>Novo Access Token<input type="password" name="access_token" autocomplete="off" required /></label>
+        <div style="align-self:end"><button type="submit" class="btn btn-small">Salvar novo token</button></div>
+      </form>
+    </details>
+
+    <details>
+      <summary class="btn btn-small" style="display:inline-block;cursor:pointer">Ver instruções do webhook</summary>
+      <div style="margin-top:0.6rem">
+        <p class="meta">Ação separada e opcional — assina o aplicativo no WABA para o campo <code>messages</code>, para a Meta começar a chamar o webhook para os números deste WABA. Exige confirmação explícita e fica registrada no log de auditoria.</p>
+        <form method="post" action="${base}/assinar-webhook">
+          <label class="checkbox-line"><input type="checkbox" name="confirmar" value="1" required /> Confirmo que quero assinar o aplicativo neste WABA agora</label>
+          <button type="submit" class="btn btn-small" style="margin-top:0.5rem">Assinar aplicativo no WABA</button>
+        </form>
+      </div>
+    </details>
+  </div>`;
+}
+
+export function whatsappAdminPage(opts: {
+  companies: CompanyAdminRow[];
+  connections: Map<number, ConnectionAdminView | null>;
+  graphApiVersion: string;
+  webhookUrl: string;
+  verifyTokenConfigured: boolean;
+  appSecretConfigured: boolean;
+  notice?: string;
+  error?: string;
+}): string {
+  const panels = opts.companies.map((c) => whatsappAdminCompanyPanel(c, opts.connections.get(c.id) ?? null)).join("");
+
+  return page(
+    "Conexões do WhatsApp — HUB ACTION",
+    `<div style="max-width:1000px;margin:0 auto;padding:1.5rem">
+      <div class="toolbar"><h2 style="margin:0">Conexões do WhatsApp</h2><a href="/admin" class="btn btn-small">&larr; Voltar</a></div>
+      <p class="meta">Área exclusiva do administrador geral. Cadastre, teste, ative ou desative a conexão oficial de cada empresa cliente. Credenciais nunca aparecem em texto — só "configurado" ou não.</p>
+
+      ${opts.notice ? `<p class="success">${escapeHtml(opts.notice)}</p>` : ""}
+      ${opts.error ? `<p class="error">${escapeHtml(opts.error)}</p>` : ""}
+
+      <div class="panel">
+        <h3>Configuração global do servidor</h3>
+        <ul class="list" style="margin-bottom:0.75rem">
+          <li><span>Versão da Graph API</span> <span>${escapeHtml(opts.graphApiVersion)}</span></li>
+          <li><span>Verify Token do webhook</span> <span class="badge ${opts.verifyTokenConfigured ? "badge-humano" : "badge-encerrado"}">${opts.verifyTokenConfigured ? "configurado" : "não configurado"}</span></li>
+          <li><span>App Secret</span> <span class="badge ${opts.appSecretConfigured ? "badge-humano" : "badge-encerrado"}">${opts.appSecretConfigured ? "configurado" : "não configurado"}</span></li>
+        </ul>
+        <p class="meta">URL de callback do webhook (cadastre no painel da Meta, campo "Callback URL"):</p>
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap;align-items:center">
+          <input id="whatsapp-webhook-url" type="text" readonly value="${escapeHtml(opts.webhookUrl)}" onclick="this.select()" style="flex:1;min-width:260px" />
+          <button type="button" class="btn btn-small" onclick="navigator.clipboard.writeText(document.getElementById('whatsapp-webhook-url').value)">Copiar URL</button>
+        </div>
+        <h4 style="margin:1rem 0 0.4rem;font-size:0.85rem;color:#94a3b8;text-transform:uppercase">Passo a passo</h4>
+        <ol class="list" style="padding-left:1.1rem">
+          <li>Criar ou selecionar o aplicativo no Meta for Developers.</li>
+          <li>Obter o WABA ID e o Phone Number ID do número da empresa.</li>
+          <li>Gerar um token de acesso apropriado para produção (token de sistema, não o temporário de 24h).</li>
+          <li>Cadastrar esses dados abaixo, na empresa correta.</li>
+          <li>Clicar em "Testar conexão" e confirmar que a Meta reconheceu o número.</li>
+          <li>Cadastrar a URL acima + o Verify Token na tela de Webhooks do app, na Meta.</li>
+          <li>Assinar o campo <code>messages</code> (pelo painel da Meta, ou pelo botão "Assinar aplicativo no WABA" abaixo).</li>
+          <li>Só então clicar em "Ativar" — nunca antes de todas as verificações acima.</li>
+        </ol>
+      </div>
+
+      ${panels || '<p class="meta">Nenhuma empresa cadastrada.</p>'}
     </div>`
   );
 }
@@ -900,23 +1042,22 @@ const MODE_LABELS: Record<ConnectionStatusReport["mode"], string> = {
   PRODUCAO: "Produção",
 };
 
-/** Área "Conexão do WhatsApp" — exclusiva de administrador; status sempre calculado, nunca "Conectado" por campo preenchido. */
-function whatsappConnectionPanel(companyId: number, report: ConnectionStatusReport, verifySuccess?: string, verifyError?: string): string {
+/**
+ * Área "Conexão do WhatsApp" — SÓ LEITURA para o administrador da empresa:
+ * status, número conectado e data da última validação. Cadastrar, testar,
+ * ativar/desativar ou trocar credenciais é exclusivo do administrador geral
+ * da Hub Action, na área /admin/whatsapp (ver whatsappAdminPage) — o
+ * administrador da empresa não vê nem consegue acionar isso aqui de propósito.
+ */
+function whatsappConnectionPanel(report: ConnectionStatusReport): string {
   const statusBadgeClass =
-    report.statusLabel === "Verificado pela Meta"
-      ? "badge-humano"
-      : report.statusLabel === "Falha na última verificação"
-        ? "badge-encerrado"
-        : "badge-aguardando";
-
-  const credRow = (label: string, present: boolean) =>
-    `<li><span>${escapeHtml(label)}</span> <span class="badge ${present ? "badge-humano" : "badge-encerrado"}">${present ? "configurado" : "não configurado"}</span></li>`;
+    report.statusLabel === "Conectado" ? "badge-humano" : report.statusLabel === "Erro" ? "badge-encerrado" : "badge-aguardando";
 
   const fmt = (iso: string) => new Date(iso).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" });
 
   return `<div class="panel">
     <h3>Conexão do WhatsApp</h3>
-    <p class="meta" style="margin-top:-0.3rem">Visível só para administradores da empresa. Credenciais nunca aparecem aqui — só se estão configuradas ou não.</p>
+    <p class="meta" style="margin-top:-0.3rem">Visível só para administradores da empresa. Cadastro e credenciais são gerenciados pela Hub Action — aqui é só acompanhamento.</p>
 
     <div style="display:flex;gap:0.75rem;flex-wrap:wrap;margin:0.75rem 0">
       <span class="badge">${MODE_LABELS[report.mode]}</span>
@@ -925,41 +1066,19 @@ function whatsappConnectionPanel(companyId: number, report: ConnectionStatusRepo
 
     ${
       report.connection
-        ? `<p class="meta">Número associado: <strong>${report.connection.display_phone_number ? escapeHtml(report.connection.display_phone_number) : report.connection.phone_number_id}</strong></p>`
-        : `<p class="meta">Nenhum número associado — a empresa está em modo demonstração.</p>`
+        ? `<p class="meta">Número conectado: <strong>${report.connection.display_phone_number ? escapeHtml(report.connection.display_phone_number) : report.connection.phone_number_id}</strong>${report.connection.verified_name ? ` — ${escapeHtml(report.connection.verified_name)}` : ""}</p>
+           <p class="meta">Última validação: ${report.connection.last_verified_at ? fmt(report.connection.last_verified_at) : "ainda não validada"}</p>`
+        : `<p class="meta">Nenhuma conexão foi cadastrada para esta empresa ainda — a empresa está em modo demonstração.</p>`
     }
-
-    <h4 style="margin:1rem 0 0.4rem;font-size:0.85rem;color:#94a3b8;text-transform:uppercase">Credenciais no servidor</h4>
-    <ul class="list" style="margin-bottom:0.75rem">
-      ${credRow("Token de verificação do webhook", report.credentials.verifyToken)}
-      ${credRow("Segredo do aplicativo", report.credentials.appSecret)}
-      ${credRow("Token de acesso (envio)", report.credentials.accessToken)}
-    </ul>
 
     <h4 style="margin:1rem 0 0.4rem;font-size:0.85rem;color:#94a3b8;text-transform:uppercase">Evidências reais</h4>
     <p class="meta">Última mensagem recebida: ${report.lastInbound ? `${fmt(report.lastInbound.createdAt)} — "${escapeHtml(report.lastInbound.preview.slice(0, 60))}"` : "nenhuma ainda"}</p>
     <p class="meta">Última resposta enviada com sucesso: ${report.lastOutbound ? fmt(report.lastOutbound.createdAt) : "nenhuma ainda"}</p>
 
-    ${
-      report.connection
-        ? `<form method="post" action="/empresa/${companyId}/configuracoes/whatsapp/verificar" style="margin:0.75rem 0">
-            <button type="submit" class="btn btn-small">Verificar agora com a Meta</button>
-            ${report.connection.last_verified_at ? `<span class="meta"> última checagem: ${fmt(report.connection.last_verified_at)}</span>` : ""}
-          </form>`
-        : ""
-    }
-    ${verifySuccess ? `<p class="success">${escapeHtml(verifySuccess)}</p>` : ""}
-    ${verifyError ? `<p class="error">${escapeHtml(verifyError)}</p>` : ""}
-
     <h4 style="margin:1rem 0 0.4rem;font-size:0.85rem;color:#94a3b8;text-transform:uppercase">Pendências e o que falta (em linguagem simples)</h4>
     <ul class="list">
       ${report.pendencies.map((p) => `<li>${escapeHtml(p)}</li>`).join("")}
     </ul>
-    <p class="meta" style="margin-top:0.75rem">
-      Se a Meta indicar um erro de cadastro (ex.: número já registrado em outro aplicativo), essa tela não resolve
-      isso automaticamente — o ajuste é feito direto no painel da Meta for Developers.
-      Passo a passo completo para concluir a conexão: arquivo <strong>CONEXAO_WHATSAPP.md</strong> no projeto.
-    </p>
   </div>`;
 }
 
@@ -970,8 +1089,6 @@ export function settingsPage(opts: {
   canEdit: boolean;
   hours: BusinessHours;
   whatsapp?: ConnectionStatusReport;
-  whatsappVerifySuccess?: string;
-  whatsappVerifyError?: string;
   team?: { users: CompanyUserRow[]; invites: PendingInvite[]; currentUserId: number; generatedLink?: GeneratedLink; notice?: string; error?: string };
   error?: string;
   success?: string;
@@ -1024,7 +1141,7 @@ export function settingsPage(opts: {
         ${opts.canEdit ? '<div style="margin-top:1rem"><button type="submit" class="btn btn-primary">Salvar</button></div>' : '<p class="meta" style="margin-top:1rem">Apenas o administrador da empresa pode editar.</p>'}
       </form>
       ${opts.canEdit ? teamPanel : ""}
-      ${opts.canEdit && opts.whatsapp ? whatsappConnectionPanel(opts.company.id, opts.whatsapp, opts.whatsappVerifySuccess, opts.whatsappVerifyError) : ""}`,
+      ${opts.canEdit && opts.whatsapp ? whatsappConnectionPanel(opts.whatsapp) : ""}`,
   });
 }
 

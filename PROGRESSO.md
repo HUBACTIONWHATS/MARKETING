@@ -492,6 +492,55 @@ Acessei `https://hub-action-crm-demo.onrender.com` só para conferir (GET em `/h
 
 ### Pendências reais
 
-- Confirmar com o usuário o que mudou entre o primeiro deploy (falhou) e o segundo (passou), para decidir se ainda é preciso alguma correção de dependências.
-- **Configurar `DATABASE_URL` no painel do Render** (Environment → colar a mesma connection string da Neon já usada localmente) para conectar ao banco real e permitir login — sem isso o piloto publicado não é utilizável.
+- ~~Configurar `DATABASE_URL` no painel do Render~~ — feito pelo usuário; `/health` confirmado `{"status":"ok","db":"postgres"}` depois do redeploy.
 - Nenhum arquivo de código foi alterado nesta etapa. Nenhum segredo, `.env` ou dado pessoal foi tocado (só leitura de cabeçalhos HTTP públicos do próprio serviço).
+- **Aviso de segurança dado ao usuário**: a connection string da Neon (com a senha) foi colada em texto puro na conversa ao configurar a variável — recomendei resetar a senha no painel da Neon depois. Não vi nem gravei esse valor em nenhum arquivo.
+
+## Etapa concluída: Etapa 12 — Área administrativa exclusiva "Conexões do WhatsApp"
+
+Pedido pelo usuário: uma área só do administrador geral da Hub Action para cadastrar/gerenciar a conexão oficial de cada empresa cliente, com credenciais cifradas, isolamento entre empresas testado e nada publicado/ativado de verdade. **Nenhum número real foi ativado, nenhuma mensagem foi enviada pela Meta, nenhum plano pago foi ativado.**
+
+### Arquitetura examinada antes de mudar código (pedido explícito)
+
+Reaproveitada em vez de duplicada: a tabela `whatsapp_connections` (já existia, Etapa 5/7), `requirePlatformAdmin`/`requireCompanyAccess` ([src/auth.ts](src/auth.ts)), `audit()` e o padrão de token de uso único em SHA-256 ([src/access.ts](src/access.ts)), a camada de banco assíncrona por dialeto ([src/db.ts](src/db.ts)), o CSRF automático por `<form method="post"` ([src/csrf.ts](src/csrf.ts)) e o padrão de rate limit em memória de [src/loginThrottle.ts](src/loginThrottle.ts). Nenhuma segunda implementação da integração com a Meta foi criada — [src/whatsapp.ts](src/whatsapp.ts) continua sendo o único lugar com essa regra de negócio, só que agora com credencial por empresa em vez de global.
+
+### Decisões
+
+- **O que é global (servidor) vs. por empresa (banco), redefinido**: `WHATSAPP_APP_SECRET`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_GRAPH_API_VERSION` continuam variáveis de ambiente globais (um webhook só para todas as empresas). O Access Token, WABA ID e Phone Number ID saíram do `.env` e passaram a ser por empresa, cadastrados só pela tela `/admin/whatsapp` — mudança pedida explicitamente; não é mais possível ter um único `WHATSAPP_ACCESS_TOKEN` servindo várias empresas.
+- **Criptografia** ([src/credentialCrypto.ts](src/credentialCrypto.ts)): AES-256-GCM só com o módulo nativo `crypto` (sem dependência nova, mesmo padrão já usado em csrf.ts/access.ts/whatsapp.ts). Chave `CREDENTIAL_ENCRYPTION_KEY` (32 bytes, hex ou base64) só no servidor; formato gravado `iv:authTag:cifrado`, GCM detecta qualquer adulteração ou chave errada (nunca decifra "lixo" em silêncio).
+- **Ciclo de vida com status explícito e armazenado** (`whatsapp_connections.status`: Pendente/Em validação/Conectado/Erro/Desativado — [migrations/sqlite/0009_whatsapp_admin_credenciais.sql](migrations/sqlite/0009_whatsapp_admin_credenciais.sql) e o equivalente em `migrations/postgres/0002_...sql`), sempre recalculado por `computeConnectionStatus` a partir de fatos reais — nunca setado à mão. "Conectado" exige `last_verified_ok=1` e `active=1` ao mesmo tempo; "Desativado" só sai da ação explícita `deactivateConnection` (nunca é efeito colateral de cadastrar ou trocar token, senão toda conexão nova apareceria como "desativada" em vez de "em validação" — bug pego e corrigido durante os testes desta etapa).
+- **Validação real contra a Meta, numa única chamada**: `GET /{waba_id}/phone_numbers` (não `/{phone_number_id}` isolado) — confirma ao mesmo tempo que o token é válido, que o Phone Number ID pertence àquele WABA ID (compatibilidade, não só existência) e traz número formatado, nome verificado e qualidade confirmados pela Meta. Só dados confirmados são salvos.
+- **"Ativar" é sempre uma ação separada e posterior ao teste**: `activateConnection` recusa (com mensagem clara) se `last_verified_ok !== 1`. "Substituir credencial" também desativa a conexão e invalida a última validação — o token novo ainda não foi testado, não pode continuar valendo para enviar mensagens reais até novo teste + ativação.
+- **Nunca volta ao navegador**: `toAdminViewModel` remove `access_token_encrypted` de qualquer objeto entregue à view (testado); a tela só mostra um badge "configurado"/"não configurado" e um campo em branco para digitar um valor novo.
+- **Rota de verificação do lado da empresa removida** ([src/server.ts](src/server.ts)/[src/views.ts](src/views.ts)): antes o administrador da empresa podia clicar em "Verificar agora" (Etapa 8) — pedido explícito desta etapa moveu essa capacidade para exclusiva do administrador geral. O administrador da empresa continua vendo status, número conectado e data da última validação (`whatsappConnectionPanel`, agora só leitura).
+- **Envio de mensagem real usa o token da própria conexão**: a rota "Responder" de uma conversa `WHATSAPP_OFICIAL` decifra o token da empresa antes de chamar `sendWhatsAppMessage` — não existe mais um token global usado por todo mundo.
+- **Assinar aplicativo no WABA**: ação separada e opcional (`POST /{waba_id}/subscribed_apps`), atrás de uma caixa de confirmação explícita + log de auditoria — nunca chamada automaticamente.
+- **Rate limit** ([src/actionThrottle.ts](src/actionThrottle.ts), novo — generaliza o padrão de loginThrottle.ts): "Testar conexão" e "Assinar aplicativo" limitados por IP+empresa, evitando abuso da API externa.
+- **Auditoria**: `whatsapp_credencial_cadastrada`, `whatsapp_credencial_substituida`, `whatsapp_conexao_testada`, `whatsapp_conexao_ativada`, `whatsapp_conexao_desativada`, `whatsapp_app_assinado_waba` — sempre com resultado, nunca com o segredo (testado).
+
+### O que foi implementado
+
+- [src/credentialCrypto.ts](src/credentialCrypto.ts) (novo), [src/actionThrottle.ts](src/actionThrottle.ts) (novo).
+- [migrations/sqlite/0009_whatsapp_admin_credenciais.sql](migrations/sqlite/0009_whatsapp_admin_credenciais.sql) e [migrations/postgres/0002_whatsapp_admin_credenciais.sql](migrations/postgres/0002_whatsapp_admin_credenciais.sql): `access_token_encrypted`, `verified_name`, `quality_rating`, `status` na tabela já existente.
+- [src/whatsapp.ts](src/whatsapp.ts): `computeConnectionStatus`, `createCompanyConnection`, `replaceConnectionToken`, `activateConnection`, `deactivateConnection`, `testCompanyConnection`, `subscribeAppToWaba`, `toAdminViewModel`, `findConnectionByCompanyId`; `verifyPhoneNumberConnection` e `sendWhatsAppMessage` passaram a receber o token do chamador em vez de ler variável global.
+- [src/server.ts](src/server.ts): seção `/admin/whatsapp` (listar, cadastrar, testar, ativar, desativar, substituir token, assinar webhook — todas `requirePlatformAdmin` + auditadas); rota antiga de verificação do lado da empresa removida; rota de resposta decifra o token da conexão.
+- [src/views.ts](src/views.ts): `whatsappAdminPage` (nova, painel por empresa com instruções de webhook + botão de copiar URL — primeiro uso de um `onclick` no projeto, só `navigator.clipboard`, sem biblioteca nova); `whatsappConnectionPanel` simplificado para só leitura; link "Conexões do WhatsApp" no painel da Hub Action.
+- `.env.example`, [CONEXAO_WHATSAPP.md](CONEXAO_WHATSAPP.md), [src/conectar-whatsapp.ts](src/conectar-whatsapp.ts): documentação e mensagens atualizadas para o novo fluxo (CLI continua existindo só como atalho de desenvolvimento, sem token).
+
+### Verificado
+
+- `npx tsc --noEmit` limpo. `npm run build` gera `dist/server.js`.
+- **`npm test` (SQLite): 78/78.** **`npm run test:pg` (Postgres real local): 78/78** — migração `0002_whatsapp_admin_credenciais.sql` aplicada e testada de verdade no motor Postgres.
+- Testes cobrindo cada item pedido: permissão por perfil (`requirePlatformAdmin` bloqueia usuário comum, com um mock de req/res, sem servidor HTTP — mesmo padrão dos demais testes do projeto); isolamento entre empresas (testar/ativar/desativar/ler uma conexão nunca toca a de outra); criptografia (o valor gravado nunca contém o texto original, decifra com a chave certa, falha com a errada ou adulterado); ausência do token nas respostas (`toAdminViewModel`) e nos logs de auditoria (checado por substring); validação simulada da Graph API (sucesso e falha, com `fetch` trocado temporariamente só dentro do teste — sem biblioteca nova); WABA/Phone Number incompatíveis rejeitados; roteamento do webhook por `phone_number_id` (número desconhecido e desativado tratados igual); assinatura inválida rejeitada e evento duplicado ignorado (testes já existentes, confirmados continuam passando); persistência (leitura nova depois de gravar, sem cache em memória).
+- **Verificação manual de ponta a ponta com servidor real** (SQLite local descartável, `.env` real temporariamente renomeado para garantir que nada tocaria a Neon): login como Hub Action → CSRF confirmado nos formulários novos → cadastrar conexão (token nunca aparece na resposta; gravado cifrado, confirmado direto no banco) → "Testar conexão" chamou a Graph API real da Meta com token inválido de propósito e recebeu "Invalid OAuth access token" de volta, tratado sem quebrar → "Ativar" recusado antes do teste ter sucesso → "Substituir credencial" funcionou e desativou a conexão → "Assinar aplicativo" recusado sem a caixa de confirmação → login como administrador da Empresa A confirmou 403 real em `/admin/whatsapp` e a tela de Configurações mostrando só status (sem botão de verificar, sem lista de credenciais) → handshake do webhook (`GET`) continua funcionando sem alteração.
+
+### Depende de você (para usar de verdade)
+
+1. Gerar e configurar `CREDENTIAL_ENCRYPTION_KEY` no `.env`/Render (comando pronto no `.env.example`) — sem ela a tela não cadastra nem lê nenhuma credencial.
+2. Confirmar que `WHATSAPP_VERIFY_TOKEN` e `WHATSAPP_APP_SECRET` (já existiam) continuam configurados.
+3. Cadastrar a conexão de cada empresa pela tela `/admin/whatsapp` quando tiver as credenciais reais — nada disso foi feito por mim.
+
+### Pendências reais
+
+- Envio de mensagens de template continua não implementado (mesma pendência de antes).
+- Diagnóstico do número de teste e integração com o robô/atendimento externo continuam pendentes, como já declarado nas telas.

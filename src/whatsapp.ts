@@ -10,31 +10,43 @@
  * também enviar mensagens por esse mesmo número, essa garantia se perde — ver
  * CONEXAO_WHATSAPP.md.
  *
- * Nada aqui é chamado automaticamente: sem as variáveis de ambiente
- * configuradas, o envio real recusa com um erro claro (ver sendWhatsAppMessage).
+ * Credenciais — o que é global (servidor) e o que é por empresa (banco):
+ * - Globais (variáveis de ambiente, nunca no banco): WHATSAPP_APP_SECRET
+ *   (assinatura do webhook), WHATSAPP_VERIFY_TOKEN (handshake do webhook) e
+ *   WHATSAPP_GRAPH_API_VERSION. Um único webhook atende todas as empresas.
+ * - Por empresa (tabela whatsapp_connections, gerenciada só pelo
+ *   administrador geral em /admin/whatsapp — ver server.ts): WABA ID,
+ *   Phone Number ID e o Access Token, este sempre cifrado
+ *   (src/credentialCrypto.ts) com a chave CREDENTIAL_ENCRYPTION_KEY. Nunca
+ *   gravado nem devolvido em texto puro — ver toAdminViewModel.
+ *
+ * Nada aqui é chamado automaticamente: sem as credenciais configuradas, o
+ * envio e a verificação recusam com um erro claro em vez de tentar e falhar
+ * de forma confusa.
  */
 import crypto from "crypto";
+import { decryptSecret, encryptSecret } from "./credentialCrypto";
 import { db } from "./db";
 
-export interface WhatsappCredentials {
+export interface WhatsappServerCredentials {
   verifyToken: string | undefined;
   appSecret: string | undefined;
-  accessToken: string | undefined;
   graphApiVersion: string;
 }
 
-export function getWhatsappCredentials(): WhatsappCredentials {
+/** Credenciais globais do servidor — únicas para todas as empresas. O Access Token NÃO está aqui: é por empresa, ver WhatsappConnection. */
+export function getWhatsappCredentials(): WhatsappServerCredentials {
   return {
     verifyToken: process.env.WHATSAPP_VERIFY_TOKEN,
     appSecret: process.env.WHATSAPP_APP_SECRET,
-    accessToken: process.env.WHATSAPP_ACCESS_TOKEN,
     graphApiVersion: process.env.WHATSAPP_GRAPH_API_VERSION || "v23.0",
   };
 }
 
-// --- Mapeamento número -> empresa -------------------------------------------
+// --- Conexão por empresa ------------------------------------------------------
 
 export type WhatsappEnvironment = "TESTE" | "PRODUCAO";
+export type ConnectionStatus = "PENDENTE" | "EM_VALIDACAO" | "CONECTADO" | "ERRO" | "DESATIVADO";
 
 export interface WhatsappConnection {
   id: number;
@@ -48,10 +60,50 @@ export interface WhatsappConnection {
   last_verified_at: string | null;
   last_verified_ok: number | null; // 0 | 1 | null (nunca verificado)
   last_verified_detail: string | null;
+  /** Cifrado (src/credentialCrypto.ts) — nunca decifrado fora de testCompanyConnection/sendWhatsAppMessage, nunca exposto à view. */
+  access_token_encrypted: string | null;
+  verified_name: string | null;
+  quality_rating: string | null;
+  status: ConnectionStatus;
 }
+
+/**
+ * Recalcula o status a partir de fatos reais — nunca "Conectado" só por campo
+ * preenchido ou só por ter clicado em "Ativar" (exige last_verified_ok=1 E
+ * active=1 ao mesmo tempo). "Desativado" NÃO sai daqui: é um estado só de
+ * deactivateConnection (ação explícita do administrador) — cadastrar,
+ * substituir token ou testar uma conexão nunca produzem "Desativado" sozinhos,
+ * mesmo com active=0 (senão toda conexão recém-criada, ainda não ativada,
+ * apareceria como "desativada" em vez de "em validação").
+ */
+export function computeConnectionStatus(row: {
+  access_token_encrypted: string | null;
+  waba_id: string | null;
+  phone_number_id: string | null;
+  active: number;
+  last_verified_ok: number | null;
+}): ConnectionStatus {
+  if (!row.access_token_encrypted || !row.waba_id || !row.phone_number_id) return "PENDENTE";
+  if (row.last_verified_ok === 1 && row.active === 1) return "CONECTADO";
+  if (row.last_verified_ok === 0) return "ERRO";
+  return "EM_VALIDACAO";
+}
+
+export const STATUS_LABELS: Record<ConnectionStatus, string> = {
+  PENDENTE: "Pendente",
+  EM_VALIDACAO: "Em validação",
+  CONECTADO: "Conectado",
+  ERRO: "Erro",
+  DESATIVADO: "Desativado",
+};
 
 export function findConnectionByPhoneNumberId(phoneNumberId: string): Promise<WhatsappConnection | undefined> {
   return db.get<WhatsappConnection>("SELECT * FROM whatsapp_connections WHERE phone_number_id = ? AND active = 1", phoneNumberId);
+}
+
+/** Uma empresa tem no máximo uma conexão gerenciada pela tela administrativa (ver createCompanyConnection). */
+export function findConnectionByCompanyId(companyId: number): Promise<WhatsappConnection | undefined> {
+  return db.get<WhatsappConnection>("SELECT * FROM whatsapp_connections WHERE company_id = ? ORDER BY id DESC LIMIT 1", companyId);
 }
 
 export function listConnectionsForCompany(companyId: number): Promise<WhatsappConnection[]> {
@@ -59,9 +111,11 @@ export function listConnectionsForCompany(companyId: number): Promise<WhatsappCo
 }
 
 /**
- * Cadastra (ou reativa) qual empresa é dona de um phone_number_id. Uso
- * administrativo — ver CONEXAO_WHATSAPP.md. `environment` é sempre declarado
- * explicitamente por quem conecta (nunca adivinhado pelo formato do número).
+ * Cadastra (ou reativa) qual empresa é dona de um phone_number_id — uso do
+ * script de linha de comando (conectar-whatsapp.ts), sem token, para
+ * demonstração/desenvolvimento local. A tela administrativa segura
+ * (createCompanyConnection, abaixo) é o caminho para credenciais reais.
+ * `environment` é sempre declarado explicitamente — nunca adivinhado.
  */
 export async function upsertConnection(
   companyId: number,
@@ -93,46 +147,256 @@ export async function upsertConnection(
   );
 }
 
+// --- Área administrativa exclusiva (Hub Action) — CRUD seguro da conexão ----
+// Todas as funções abaixo são chamadas só por rotas protegidas com
+// requirePlatformAdmin (ver server.ts, seção /admin/whatsapp) e sempre
+// auditadas (access.ts::audit) pelo chamador — sem o segredo, nunca com ele.
+
+export interface AdminActionResult {
+  ok: boolean;
+  error?: string;
+}
+
+/** O que a view pode receber — nunca o token cifrado. Use sempre isto (nunca a row crua) ao montar a tela. */
+export type ConnectionAdminView = Omit<WhatsappConnection, "access_token_encrypted"> & { hasAccessToken: boolean };
+
+export function toAdminViewModel(row: WhatsappConnection): ConnectionAdminView {
+  const { access_token_encrypted, ...rest } = row;
+  return { ...rest, hasAccessToken: !!access_token_encrypted };
+}
+
+function isBlank(v: string | null | undefined): boolean {
+  return !v || !v.trim();
+}
+
+/** Cadastra a conexão de uma empresa (uma por empresa). Rejeita phone_number_id já usado por outra empresa ativa — nunca reatribui silenciosamente. */
+export async function createCompanyConnection(
+  companyId: number,
+  input: { phoneNumberId: string; wabaId: string; accessToken: string; environment: WhatsappEnvironment }
+): Promise<AdminActionResult> {
+  if (isBlank(input.phoneNumberId) || isBlank(input.wabaId) || isBlank(input.accessToken)) {
+    return { ok: false, error: "Preencha WABA ID, Phone Number ID e o Access Token." };
+  }
+  const existingForCompany = await findConnectionByCompanyId(companyId);
+  if (existingForCompany) {
+    return { ok: false, error: "Esta empresa já tem uma conexão cadastrada. Use \"Substituir credencial\" para trocar o token." };
+  }
+  const phoneInUse = await db.get<{ id: number; company_id: number }>(
+    "SELECT id, company_id FROM whatsapp_connections WHERE phone_number_id = ?",
+    input.phoneNumberId.trim()
+  );
+  if (phoneInUse && phoneInUse.company_id !== companyId) {
+    return { ok: false, error: "Este Phone Number ID já está cadastrado para outra empresa." };
+  }
+  let encrypted: string;
+  try {
+    encrypted = encryptSecret(input.accessToken.trim());
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Falha ao cifrar a credencial." };
+  }
+  const status = computeConnectionStatus({
+    access_token_encrypted: encrypted,
+    waba_id: input.wabaId.trim(),
+    phone_number_id: input.phoneNumberId.trim(),
+    active: 0,
+    last_verified_ok: null,
+  });
+  await db.run(
+    `INSERT INTO whatsapp_connections
+      (company_id, phone_number_id, waba_id, environment, active, created_at, access_token_encrypted, status)
+     VALUES (?, ?, ?, ?, 0, ?, ?, ?)`,
+    companyId,
+    input.phoneNumberId.trim(),
+    input.wabaId.trim(),
+    input.environment,
+    new Date().toISOString(),
+    encrypted,
+    status
+  );
+  return { ok: true };
+}
+
 /**
- * Verificação REAL contra a Meta — nunca inferida de "os campos estão
- * preenchidos". Faz uma leitura simples (GET, sem custo, não manda
- * mensagem) confirmando que o token de acesso realmente enxerga esse número.
+ * Troca só o token (nunca precisa reenviar WABA ID/Phone Number ID). Invalida
+ * a última validação e desativa a conexão — o token novo ainda não foi
+ * testado, então não pode continuar valendo para enviar mensagens reais até
+ * um novo "Testar conexão" + "Ativar".
  */
+export async function replaceConnectionToken(companyId: number, newAccessToken: string): Promise<AdminActionResult> {
+  if (isBlank(newAccessToken)) return { ok: false, error: "Informe o novo Access Token." };
+  const connection = await findConnectionByCompanyId(companyId);
+  if (!connection) return { ok: false, error: "Esta empresa ainda não tem conexão cadastrada." };
+  let encrypted: string;
+  try {
+    encrypted = encryptSecret(newAccessToken.trim());
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "Falha ao cifrar a credencial." };
+  }
+  const status = computeConnectionStatus({
+    access_token_encrypted: encrypted,
+    waba_id: connection.waba_id,
+    phone_number_id: connection.phone_number_id,
+    active: 0,
+    last_verified_ok: null,
+  });
+  await db.run(
+    "UPDATE whatsapp_connections SET access_token_encrypted = ?, active = 0, last_verified_ok = NULL, last_verified_at = NULL, last_verified_detail = NULL, status = ? WHERE company_id = ?",
+    encrypted,
+    status,
+    companyId
+  );
+  return { ok: true };
+}
+
+/** Só desliga (sempre permitido, sempre reversível). Não apaga nada. */
+export async function deactivateConnection(companyId: number): Promise<AdminActionResult> {
+  const connection = await findConnectionByCompanyId(companyId);
+  if (!connection) return { ok: false, error: "Esta empresa ainda não tem conexão cadastrada." };
+  await db.run("UPDATE whatsapp_connections SET active = 0, status = 'DESATIVADO' WHERE company_id = ?", companyId);
+  return { ok: true };
+}
+
+/** Só liga depois de uma validação com sucesso — nunca "Conectado" só por ter clicado no botão. */
+export async function activateConnection(companyId: number): Promise<AdminActionResult> {
+  const connection = await findConnectionByCompanyId(companyId);
+  if (!connection) return { ok: false, error: "Esta empresa ainda não tem conexão cadastrada." };
+  if (connection.last_verified_ok !== 1) {
+    return { ok: false, error: 'Teste a conexão com sucesso ("Testar conexão") antes de ativar.' };
+  }
+  await db.run("UPDATE whatsapp_connections SET active = 1, status = 'CONECTADO' WHERE company_id = ?", companyId);
+  return { ok: true };
+}
+
+// --- Validação real contra a Meta -------------------------------------------
+
 export interface VerifyResult {
   ok: boolean;
   detail: string;
+  displayPhoneNumber?: string;
+  verifiedName?: string;
+  qualityRating?: string;
 }
 
-export async function verifyPhoneNumberConnection(phoneNumberId: string): Promise<VerifyResult> {
-  const { accessToken, graphApiVersion } = getWhatsappCredentials();
-  if (!accessToken) {
-    return { ok: false, detail: "WHATSAPP_ACCESS_TOKEN não configurado no servidor." };
-  }
+/** Extrai uma mensagem de erro segura da resposta da Meta — nunca inclui token nem cabeçalhos. */
+function sanitizeMetaError(json: any, fallback: string): string {
+  const msg = json?.error?.message;
+  return typeof msg === "string" && msg.trim() ? msg : fallback;
+}
+
+/**
+ * Verificação REAL contra a Meta — nunca inferida de "os campos estão
+ * preenchidos". Uma única chamada de leitura (GET, sem custo, não manda
+ * mensagem) na lista de números do PRÓPRIO WABA: confirma ao mesmo tempo que
+ * o token é válido, que o Phone Number ID pertence a esse WABA ID (compatível
+ * — não só "existe") e traz o número formatado, nome verificado e qualidade
+ * confirmados pela Meta.
+ */
+export async function verifyPhoneNumberConnection(
+  accessToken: string | null | undefined,
+  wabaId: string | null | undefined,
+  phoneNumberId: string,
+  graphApiVersion: string
+): Promise<VerifyResult> {
+  if (!accessToken) return { ok: false, detail: "Access Token não configurado para esta conexão." };
+  if (!wabaId) return { ok: false, detail: "WABA ID não configurado para esta conexão." };
   try {
     const res = await fetch(
-      `https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}?fields=display_phone_number,verified_name`,
+      `https://graph.facebook.com/${graphApiVersion}/${wabaId}/phone_numbers?fields=id,display_phone_number,verified_name,quality_rating`,
       { headers: { Authorization: `Bearer ${accessToken}` } }
     );
     const json = (await res.json().catch(() => null)) as any;
     if (!res.ok) {
-      return { ok: false, detail: json?.error?.message || `A Meta recusou a verificação (HTTP ${res.status}).` };
+      return { ok: false, detail: sanitizeMetaError(json, `A Meta recusou a verificação (HTTP ${res.status}).`) };
     }
-    const label = json?.display_phone_number ? String(json.display_phone_number) : phoneNumberId;
-    return { ok: true, detail: `Confirmado pela Meta: ${label}${json?.verified_name ? ` (${json.verified_name})` : ""}.` };
+    const match = (json?.data ?? []).find((p: any) => p?.id === phoneNumberId);
+    if (!match) {
+      return { ok: false, detail: "O Phone Number ID informado não pertence a este WABA ID (ou o token não tem acesso a ele)." };
+    }
+    return {
+      ok: true,
+      detail: `Confirmado pela Meta: ${match.display_phone_number}${match.verified_name ? ` (${match.verified_name})` : ""}.`,
+      displayPhoneNumber: match.display_phone_number,
+      verifiedName: match.verified_name ?? undefined,
+      qualityRating: match.quality_rating ?? undefined,
+    };
   } catch (err) {
     return { ok: false, detail: err instanceof Error ? err.message : "Falha de rede ao consultar a Meta." };
   }
 }
 
-export async function recordVerification(phoneNumberId: string, result: VerifyResult): Promise<void> {
+/** Testa a conexão de uma empresa (decifra o token, chama a Meta) e grava o resultado — só dados confirmados pela Meta são salvos. */
+export async function testCompanyConnection(companyId: number, graphApiVersion: string): Promise<VerifyResult> {
+  const connection = await findConnectionByCompanyId(companyId);
+  if (!connection) return { ok: false, detail: "Esta empresa ainda não tem conexão cadastrada." };
+
+  let accessToken: string | undefined;
+  try {
+    accessToken = connection.access_token_encrypted ? decryptSecret(connection.access_token_encrypted) : undefined;
+  } catch {
+    return { ok: false, detail: "Não foi possível decifrar a credencial salva — substitua o token." };
+  }
+
+  const result = await verifyPhoneNumberConnection(accessToken, connection.waba_id, connection.phone_number_id, graphApiVersion);
+  const status = computeConnectionStatus({
+    access_token_encrypted: connection.access_token_encrypted,
+    waba_id: connection.waba_id,
+    phone_number_id: connection.phone_number_id,
+    active: connection.active,
+    last_verified_ok: result.ok ? 1 : 0,
+  });
   await db.run(
-    "UPDATE whatsapp_connections SET last_verified_at = ?, last_verified_ok = ?, last_verified_detail = ? WHERE phone_number_id = ?",
+    `UPDATE whatsapp_connections SET
+       last_verified_at = ?, last_verified_ok = ?, last_verified_detail = ?,
+       display_phone_number = COALESCE(?, display_phone_number),
+       verified_name = COALESCE(?, verified_name),
+       quality_rating = COALESCE(?, quality_rating),
+       status = ?
+     WHERE company_id = ?`,
     new Date().toISOString(),
     result.ok ? 1 : 0,
     result.detail,
-    phoneNumberId
+    result.displayPhoneNumber ?? null,
+    result.verifiedName ?? null,
+    result.qualityRating ?? null,
+    status,
+    companyId
   );
+  return result;
 }
+
+/**
+ * Ação separada e explícita (nunca automática): assina o app no WABA para o
+ * campo `messages`, para que a Meta comece a chamar nosso webhook para os
+ * números desse WABA. Chamador (server.ts) exige confirmação explícita do
+ * administrador e sempre audita, com sucesso ou falha.
+ */
+export async function subscribeAppToWaba(companyId: number, graphApiVersion: string): Promise<{ ok: boolean; detail: string }> {
+  const connection = await findConnectionByCompanyId(companyId);
+  if (!connection) return { ok: false, detail: "Esta empresa ainda não tem conexão cadastrada." };
+  if (!connection.waba_id) return { ok: false, detail: "WABA ID não configurado para esta conexão." };
+
+  let accessToken: string | undefined;
+  try {
+    accessToken = connection.access_token_encrypted ? decryptSecret(connection.access_token_encrypted) : undefined;
+  } catch {
+    return { ok: false, detail: "Não foi possível decifrar a credencial salva — substitua o token." };
+  }
+  if (!accessToken) return { ok: false, detail: "Access Token não configurado para esta conexão." };
+
+  try {
+    const res = await fetch(`https://graph.facebook.com/${graphApiVersion}/${connection.waba_id}/subscribed_apps`, {
+      method: "POST",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    const json = (await res.json().catch(() => null)) as any;
+    if (!res.ok) return { ok: false, detail: sanitizeMetaError(json, `A Meta recusou a assinatura (HTTP ${res.status}).`) };
+    return { ok: true, detail: "Aplicativo assinado no WABA — a Meta passa a chamar o webhook para os números deste WABA." };
+  } catch (err) {
+    return { ok: false, detail: err instanceof Error ? err.message : "Falha de rede ao chamar a Meta." };
+  }
+}
+
+// --- Evidências reais e relatório de status (tela da empresa, só leitura) --
 
 export interface LastMessageInfo {
   createdAt: string;
@@ -169,20 +433,26 @@ export interface ConnectionStatusReport {
   mode: ConnectionMode;
   /** Rótulo curto e honesto pra tela — nunca "Conectado" sem verificação real. */
   statusLabel: string;
-  connection: WhatsappConnection | null;
-  credentials: { verifyToken: boolean; appSecret: boolean; accessToken: boolean };
+  connection: ConnectionAdminView | null;
+  /** Credenciais globais do servidor (webhook) — não incluem o Access Token, que é por empresa. */
+  serverCredentials: { verifyToken: boolean; appSecret: boolean };
   lastInbound: LastMessageInfo | null;
   lastOutbound: LastMessageInfo | null;
   /** Cada item em linguagem simples — o que falta e por quê, sem prometer correção automática. */
   pendencies: string[];
 }
 
-/** Monta o status real da conexão de uma empresa — a fonte de verdade da tela "Conexão do WhatsApp". */
+/**
+ * Monta o status real da conexão de uma empresa — usado pela tela
+ * (só leitura) do administrador da empresa em Configurações. A validação em
+ * si (chamar a Meta) é exclusiva do administrador geral — ver
+ * testCompanyConnection e /admin/whatsapp em server.ts.
+ */
 export async function buildConnectionStatusReport(companyId: number): Promise<ConnectionStatusReport> {
   const creds = getWhatsappCredentials();
-  const credentials = { verifyToken: !!creds.verifyToken, appSecret: !!creds.appSecret, accessToken: !!creds.accessToken };
-  const connection = (await listConnectionsForCompany(companyId)).find((c) => c.active === 1) ?? null;
-  const allCredentialsPresent = credentials.verifyToken && credentials.appSecret && credentials.accessToken;
+  const serverCredentials = { verifyToken: !!creds.verifyToken, appSecret: !!creds.appSecret };
+  const row = await findConnectionByCompanyId(companyId);
+  const connection = row ? toAdminViewModel(row) : null;
 
   const mode: ConnectionMode = connection ? connection.environment : "DEMONSTRACAO";
   const lastInbound = connection ? (await getLastRealInboundMessage(companyId)) ?? null : null;
@@ -190,22 +460,23 @@ export async function buildConnectionStatusReport(companyId: number): Promise<Co
 
   const pendencies: string[] = [];
   if (!connection) {
-    pendencies.push("Nenhum número foi associado a esta empresa ainda (feito por linha de comando — ver CONEXAO_WHATSAPP.md).");
+    pendencies.push("Nenhuma conexão foi cadastrada para esta empresa ainda — peça à Hub Action.");
   }
-  if (!allCredentialsPresent) {
-    const faltando = [
-      !credentials.verifyToken && "token de verificação do webhook",
-      !credentials.appSecret && "segredo do aplicativo",
-      !credentials.accessToken && "token de acesso",
-    ].filter(Boolean);
-    pendencies.push(`Faltam credenciais no servidor (.env): ${faltando.join(", ")}.`);
+  if (!serverCredentials.verifyToken || !serverCredentials.appSecret) {
+    const faltando = [!serverCredentials.verifyToken && "token de verificação do webhook", !serverCredentials.appSecret && "segredo do aplicativo"].filter(
+      Boolean
+    );
+    pendencies.push(`Faltam credenciais globais no servidor (.env): ${faltando.join(", ")}.`);
   }
   if (connection) {
-    if (connection.last_verified_ok === null) {
-      pendencies.push('Esta conexão ainda não foi verificada — use "Verificar agora".');
+    if (!connection.hasAccessToken) {
+      pendencies.push("O Access Token desta conexão ainda não foi configurado — peça à Hub Action.");
+    } else if (connection.last_verified_ok === null) {
+      pendencies.push("Esta conexão ainda não foi testada pela Hub Action.");
     } else if (connection.last_verified_ok === 0) {
       pendencies.push(`A última verificação falhou: ${connection.last_verified_detail ?? "sem detalhes."}`);
     }
+    if (connection.status !== "CONECTADO") pendencies.push("A conexão ainda não foi ativada pela Hub Action.");
     if (!lastInbound) pendencies.push("Nenhuma mensagem real de cliente foi recebida por esta integração ainda.");
     if (!lastOutbound) pendencies.push("Nenhuma resposta real foi enviada com sucesso por esta integração ainda.");
   }
@@ -213,14 +484,9 @@ export async function buildConnectionStatusReport(companyId: number): Promise<Co
     "A integração com o robô/atendimento atual (fora do Hub Action) ainda não foi comprovada — ver CONEXAO_WHATSAPP.md."
   );
 
-  let statusLabel: string;
-  if (!connection) statusLabel = "Modo demonstração";
-  else if (!allCredentialsPresent) statusLabel = "Configuração incompleta";
-  else if (connection.last_verified_ok === 1) statusLabel = "Verificado pela Meta";
-  else if (connection.last_verified_ok === 0) statusLabel = "Falha na última verificação";
-  else statusLabel = "Ainda não verificado";
+  const statusLabel = connection ? STATUS_LABELS[connection.status] : "Modo demonstração";
 
-  return { mode, statusLabel, connection, credentials, lastInbound, lastOutbound, pendencies };
+  return { mode, statusLabel, connection, serverCredentials, lastInbound, lastOutbound, pendencies };
 }
 
 // --- Validação de assinatura do webhook -------------------------------------
@@ -339,16 +605,22 @@ export interface SendResult {
 }
 
 /**
- * Envia uma mensagem de texto livre pela Cloud API. Só funciona dentro da
+ * Envia uma mensagem de texto livre pela Cloud API, usando o Access Token
+ * cifrado já decifrado pelo chamador (ver server.ts, rota "responder") — este
+ * módulo nunca decide sozinho de onde vem o token. Só funciona dentro da
  * janela de 24h aberta pela última mensagem do cliente (fora dela a Meta
  * rejeita e exige mensagem de template, que tem custo por envio — ver
- * CONEXAO_WHATSAPP.md). Sem credenciais configuradas, recusa com erro claro
- * em vez de tentar e falhar de forma confusa.
+ * CONEXAO_WHATSAPP.md).
  */
-export async function sendWhatsAppMessage(phoneNumberId: string, toPhone: string, body: string): Promise<SendResult> {
-  const { accessToken, graphApiVersion } = getWhatsappCredentials();
+export async function sendWhatsAppMessage(
+  accessToken: string | null | undefined,
+  phoneNumberId: string,
+  toPhone: string,
+  body: string,
+  graphApiVersion: string
+): Promise<SendResult> {
   if (!accessToken) {
-    return { ok: false, error: "WHATSAPP_ACCESS_TOKEN não configurado — envio real desativado." };
+    return { ok: false, error: "Access Token não configurado para esta conexão — envio real desativado." };
   }
   try {
     const res = await fetch(`https://graph.facebook.com/${graphApiVersion}/${phoneNumberId}/messages`, {
@@ -363,7 +635,7 @@ export async function sendWhatsAppMessage(phoneNumberId: string, toPhone: string
     });
     const json = (await res.json().catch(() => null)) as any;
     if (!res.ok) {
-      return { ok: false, error: json?.error?.message || `Falha HTTP ${res.status} ao enviar via WhatsApp.` };
+      return { ok: false, error: sanitizeMetaError(json, `Falha HTTP ${res.status} ao enviar via WhatsApp.`) };
     }
     return { ok: true, waMessageId: json?.messages?.[0]?.id };
   } catch (err) {
