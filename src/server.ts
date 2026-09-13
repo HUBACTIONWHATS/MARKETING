@@ -14,8 +14,82 @@ import {
 } from "./access";
 import { requireAuth, requireCompanyAccess, requirePlatformAdmin, verifyPassword } from "./auth";
 import { checkActionThrottle, recordAction } from "./actionThrottle";
+import { evaluateAlerts, listAlerts, listAlertsAllCompanies, listGlobalRules, RULE_KINDS, saveThreshold, updateAlertStatus, type AlertStatus } from "./alerts";
+import { applyContactAttribution, declareContactSource, LEAD_SOURCES, parseWhatsAppReferral, type LeadSource } from "./attribution";
+import { computeCompanyBi, EMPTY_FILTERS, parseFilters, resolvePeriod, type BiFilters, type CompanyBi, type ResolvedPeriod } from "./bi";
+import { recordConversionEvent } from "./conversionFeedback";
 import { csrfMiddleware } from "./csrf";
-import { decryptSecret } from "./credentialCrypto";
+import { decryptSecret, isCredentialEncryptionConfigured } from "./credentialCrypto";
+import {
+  buildAttention,
+  costVsQuality,
+  detectBottlenecks,
+  executiveFunnel,
+  executiveSummary,
+  getGoals,
+  healthScore,
+  hotLeads,
+  projectMonth,
+  saveGoals,
+  scoreLeads,
+  stalledOpportunities,
+} from "./insights";
+import {
+  createConnection,
+  getAccount,
+  getConnection,
+  linkAccountToCompany,
+  listAccountsForCompany,
+  listAllAccounts,
+  listCampaignsForCompany,
+  listConnections,
+  listSyncRuns,
+  decryptConnectionTokens,
+  getCampaignForCompany,
+  listAdGroupsForCampaign,
+  listAdsForCampaign,
+  revokeConnection,
+  toConnectionView,
+  unlinkAccount,
+  upsertAccount,
+  type MarketingProvider,
+} from "./marketingModels";
+import { buildGoogleAuthorizeUrl, buildMetaAuthorizeUrl, consumeOAuthState, createOAuthState, googleOAuthConfig, metaOAuthConfig, metaScopes } from "./marketingOAuth";
+import {
+  googleExchangeCode,
+  googleGetCustomer,
+  googleListAccessibleCustomers,
+  googleListCustomerClients,
+  metaExchangeCode,
+  metaGetMe,
+  metaListAdAccounts,
+  ProviderError,
+  sanitizeText,
+} from "./marketingProviders";
+import { startSyncScheduler, syncAccount, syncAllEnabled, syncIntervalMinutes } from "./marketingSync";
+import {
+  adminAgencyPage,
+  adminIntegrationsPage,
+  adminMarketingPage,
+  type CompanySummary,
+} from "./viewsAdminMarketing";
+import {
+  alertsPage,
+  attentionBlock,
+  campaignsTable,
+  executiveCards,
+  funnelBlock,
+  intelligencePage,
+  marketingCampaignDetailPage,
+  marketingCampaignsPage,
+  marketingFunnelPage,
+  marketingOverviewPage,
+  marketingProviderPage,
+  marketingReportPage,
+  providerComparisonBlock,
+  secondaryKpis,
+  type MarketingPageBase,
+} from "./viewsMarketing";
 import { checkLoginThrottle, clearLoginThrottle, recordLoginFailure } from "./loginThrottle";
 import { SqliteSessionStore } from "./sessionStore";
 import {
@@ -42,11 +116,13 @@ import {
   createOpportunity,
   deleteStage,
   ensureDefaultPipelineStages,
+  getOpportunity,
   listOpportunitiesByStage,
   listStages,
   moveOpportunity,
   renameStage,
   reorderStage,
+  setStageFlags,
   updateOpportunityDetails,
 } from "./crm";
 import { computeDashboard } from "./dashboard";
@@ -89,6 +165,7 @@ import {
   adminPage,
   appShell,
   auditLogPage,
+  page as htmlPage,
   companySelectorPage,
   conversationDetailPage,
   invitePage,
@@ -227,6 +304,9 @@ app.post("/webhooks/whatsapp", whatsappJsonParser, async (req, res) => {
     }
     for (const msg of entry.messages) {
       const contact = await findOrCreateContact(connection.company_id, msg.contactName ?? msg.fromPhone, msg.fromPhone);
+      // Atribuição CONFIRMADA: mensagem iniciada por anúncio "Clique para o WhatsApp" traz `referral` oficial.
+      const referralSignals = parseWhatsAppReferral(msg.referral);
+      if (referralSignals) await applyContactAttribution(connection.company_id, contact.id, referralSignals);
       const conv = await findOrCreateOpenConversation(connection.company_id, contact.id, "AUTOMATICO", "WHATSAPP_OFICIAL");
       // Botão oficial cujo texto bate com pedido de atendente = gatilho B; qualquer outro clique é uma mensagem normal.
       const platformSignal = msg.isInteractiveReply && detectHumanRequest(msg.body) ? "BOTAO_PLATAFORMA" : undefined;
@@ -1079,18 +1159,57 @@ app.post("/empresa/:companyId/crm/oportunidades/:opportunityId/mover", requireCo
     await renderCrm(res, result.error);
     return;
   }
+  // Marcos reais do funil → fila de feedback de conversão (só registra; nada é enviado à Meta/Google).
+  const opp = result.opportunity;
+  if (opp && result.reached) {
+    const at = new Date().toISOString();
+    if (result.reached.qualified) await recordConversionEvent({ companyId: company.id, contactId: opp.contact_id, opportunityId: opp.id, eventType: "QualifiedLead", eventTime: at, valueCents: null, currency: "BRL" });
+    if (result.reached.attended) await recordConversionEvent({ companyId: company.id, contactId: opp.contact_id, opportunityId: opp.id, eventType: "AppointmentAttended", eventTime: at, valueCents: null, currency: "BRL" });
+    if (result.reached.won) await recordConversionEvent({ companyId: company.id, contactId: opp.contact_id, opportunityId: opp.id, eventType: "Purchase", eventTime: at, valueCents: opp.value_cents, currency: "BRL" });
+  }
   res.redirect(`/empresa/${company.id}/crm`);
 });
 
 app.post("/empresa/:companyId/crm/oportunidades/:opportunityId/editar", requireCompanyAccess, async (req, res) => {
   const company = res.locals.company;
   const body = req.body as Record<string, string | undefined>;
-  await updateOpportunityDetails(company.id, Number(req.params.opportunityId), {
+  const opportunityId = Number(req.params.opportunityId);
+  const before = await getOpportunity(company.id, opportunityId);
+  const scheduledAt = parseScheduledAt(body.scheduled_at, company.timezone);
+  const attendedAt = parseScheduledAt(body.attended_at, company.timezone);
+  await updateOpportunityDetails(company.id, opportunityId, {
     responsibleUserId: body.responsible_user_id ? Number(body.responsible_user_id) : null,
     valueCents: parseReais(body.value),
-    scheduledAt: parseScheduledAt(body.scheduled_at, company.timezone),
+    scheduledAt,
+    attendedAt,
   });
+  if (before) {
+    if (scheduledAt && !before.scheduled_at) await recordConversionEvent({ companyId: company.id, contactId: before.contact_id, opportunityId, eventType: "AppointmentScheduled", eventTime: scheduledAt, valueCents: null, currency: "BRL" });
+    if (attendedAt && !before.attended_at) await recordConversionEvent({ companyId: company.id, contactId: before.contact_id, opportunityId, eventType: "AppointmentAttended", eventTime: attendedAt, valueCents: null, currency: "BRL" });
+  }
   res.redirect(`/empresa/${company.id}/crm`);
+});
+
+/** Origem declarada pelo atendente (sempre "provável"; nunca sobrescreve uma atribuição confirmada). */
+app.post("/empresa/:companyId/crm/contatos/:contactId/origem", requireCompanyAccess, async (req, res) => {
+  const company = res.locals.company;
+  const { source } = req.body as { source?: string };
+  const contact = await getContact(company.id, Number(req.params.contactId));
+  if (contact && source && (LEAD_SOURCES as string[]).includes(source)) {
+    await declareContactSource(company.id, contact.id, source as LeadSource);
+  }
+  res.redirect(`/empresa/${company.id}/crm`);
+});
+
+app.post("/empresa/:companyId/crm/etapas/:stageId/marcadores", requireCompanyAccess, async (req, res) => {
+  const company = res.locals.company;
+  if (res.locals.membership.role !== "COMPANY_ADMIN") {
+    res.status(403).send("Apenas o administrador da empresa pode alterar os marcadores das etapas.");
+    return;
+  }
+  const body = req.body as { is_qualified?: string; is_attended?: string };
+  await setStageFlags(company.id, Number(req.params.stageId), { isQualified: body.is_qualified === "1", isAttended: body.is_attended === "1" });
+  res.redirect(`/empresa/${company.id}/crm/etapas`);
 });
 
 app.get("/empresa/:companyId/crm/etapas", requireCompanyAccess, async (_req, res) => {
@@ -1193,11 +1312,12 @@ const NAV_PAGES: Record<string, { title: string; description: string }> = {
   },
 };
 
-app.get("/empresa/:companyId/:page", requireCompanyAccess, (req, res) => {
+app.get("/empresa/:companyId/:page", requireCompanyAccess, (req, res, next) => {
   const page = String(req.params.page);
   const def = NAV_PAGES[page];
   if (!def) {
-    res.status(404).send("Página não encontrada.");
+    // Não é uma página vazia: deixa as rotas registradas depois (marketing, inteligencia, alertas) tentarem; sem nenhuma, o Express responde 404.
+    next();
     return;
   }
   res.send(
@@ -1206,8 +1326,493 @@ app.get("/empresa/:companyId/:page", requireCompanyAccess, (req, res) => {
       user: res.locals.user,
       role: res.locals.membership.role,
       active: page,
+      canViewMarketing: canViewMarketing(res),
       body: emptyState(def.title, def.description),
     })
+  );
+});
+
+// ============================================================================
+// COMMAND CENTER — Marketing (Meta Ads / Google Ads, somente leitura),
+// Inteligência e Alertas por empresa. Toda autorização no servidor:
+// requireCompanyAccess (membership) + capability de mídia paga.
+// ============================================================================
+
+/** Administrador da empresa sempre; atendente só com memberships.can_view_marketing = 1. */
+async function requireMarketingAccess(req: express.Request, res: express.Response, next: express.NextFunction): Promise<void> {
+  await requireCompanyAccess(req, res, () => {
+    const m = res.locals.membership;
+    if (m.role !== "COMPANY_ADMIN" && Number(m.can_view_marketing) !== 1) {
+      res.status(403).send(appShell({ company: res.locals.company, user: res.locals.user, role: m.role, active: "", canViewMarketing: false, body: emptyState("Sem acesso aos relatórios de mídia paga", "Peça ao administrador da empresa para liberar o acesso.") }));
+      return;
+    }
+    next();
+  });
+}
+
+function canViewMarketing(res: express.Response): boolean {
+  const m = res.locals.membership;
+  return m.role === "COMPANY_ADMIN" || Number(m.can_view_marketing) === 1;
+}
+
+async function marketingContext(req: express.Request, res: express.Response, forced: Partial<BiFilters> = {}, presetOverride?: string): Promise<MarketingPageBase & { period: ResolvedPeriod }> {
+  const company = res.locals.company;
+  const q = req.query as Record<string, string | undefined>;
+  const period = resolvePeriod(presetOverride ?? q.periodo, { from: q.de, to: q.ate }, company.timezone);
+  const filters: BiFilters = { ...parseFilters(q), ...forced };
+  const bi = await computeCompanyBi(company.id, company.timezone, period, filters);
+  const m1 = q.m1 && /^[a-z]+$/.test(q.m1) ? q.m1 : "investimento";
+  const m2 = q.m2 === undefined ? "receita" : q.m2 && /^[a-z]+$/.test(q.m2) ? q.m2 : null;
+  const sort = q.ordenar && /^[a-z_]+$/.test(q.ordenar) ? q.ordenar : null;
+  const members = await listCompanyMembers(company.id);
+  const stages = await listStages(company.id);
+  return {
+    company,
+    user: res.locals.user,
+    role: res.locals.membership.role,
+    canViewMarketing: canViewMarketing(res),
+    bi,
+    filterOptions: { campaigns: await listCampaignsForCompany(company.id), members, stages },
+    m1,
+    m2,
+    sort,
+    attention: await evaluateAlerts(company.id, bi),
+    funnel: executiveFunnel(bi.current),
+    period,
+  };
+}
+
+app.get("/empresa/:companyId/marketing", requireMarketingAccess, async (req, res) => {
+  res.send(marketingOverviewPage(await marketingContext(req, res)));
+});
+
+app.get("/empresa/:companyId/marketing/campanhas", requireMarketingAccess, async (req, res) => {
+  res.send(marketingCampaignsPage(await marketingContext(req, res)));
+});
+
+app.get("/empresa/:companyId/marketing/campanhas/:campaignId", requireMarketingAccess, async (req, res) => {
+  const company = res.locals.company;
+  const campaign = await getCampaignForCompany(company.id, Number(req.params.campaignId));
+  if (!campaign) {
+    res.status(404).send("Campanha não encontrada.");
+    return;
+  }
+  const base = await marketingContext(req, res, { campaignId: campaign.id });
+  const row = base.bi.campaigns.find((r) => r.campaign.id === campaign.id) ?? null;
+  const account = (await listAccountsForCompany(company.id)).find((a) => a.id === campaign.account_id) ?? null;
+  res.send(marketingCampaignDetailPage(base, campaign, row, await listAdGroupsForCampaign(company.id, campaign.id), await listAdsForCampaign(company.id, campaign.id), account));
+});
+
+app.get("/empresa/:companyId/marketing/meta", requireMarketingAccess, async (req, res) => {
+  const base = await marketingContext(req, res, { channel: "META_ADS" });
+  res.send(marketingProviderPage(base, "META", (await listAccountsForCompany(res.locals.company.id)).filter((a) => a.provider === "META")));
+});
+
+app.get("/empresa/:companyId/marketing/google", requireMarketingAccess, async (req, res) => {
+  const base = await marketingContext(req, res, { channel: "GOOGLE_ADS" });
+  res.send(marketingProviderPage(base, "GOOGLE", (await listAccountsForCompany(res.locals.company.id)).filter((a) => a.provider === "GOOGLE")));
+});
+
+app.get("/empresa/:companyId/marketing/funil", requireMarketingAccess, async (req, res) => {
+  const base = await marketingContext(req, res);
+  res.send(marketingFunnelPage(base, detectBottlenecks(base.bi.current)));
+});
+
+app.get("/empresa/:companyId/marketing/relatorios", requireMarketingAccess, async (req, res) => {
+  const base = await marketingContext(req, res);
+  res.send(marketingReportPage(base, executiveSummary(base.bi), costVsQuality(base.bi.campaigns)));
+});
+
+/** Refresh limitado pelo administrador da empresa: no máximo 4 por hora por empresa (≈ 1 a cada 15 min). */
+app.post("/empresa/:companyId/marketing/atualizar", requireCompanyAccess, async (req, res) => {
+  const company = res.locals.company;
+  if (res.locals.membership.role !== "COMPANY_ADMIN") {
+    res.status(403).send("Apenas o administrador da empresa pode pedir atualização.");
+    return;
+  }
+  const throttle = checkActionThrottle("marketing_refresh", "empresa", company.id, 4);
+  if (!throttle.allowed) {
+    res.status(429).send(`Atualização já solicitada recentemente. Tente de novo em ${throttle.retryAfterMinutes} minuto(s).`);
+    return;
+  }
+  recordAction("marketing_refresh", "empresa", company.id);
+  const accounts = (await listAccountsForCompany(company.id)).filter((a) => a.sync_enabled);
+  for (const a of accounts) await syncAccount(a.id, "MANUAL", res.locals.user.id, publicBaseUrl());
+  res.redirect(`/empresa/${company.id}/marketing`);
+});
+
+// --- Inteligência (Central de Performance) -------------------------------------------
+
+async function renderIntelligence(req: express.Request, res: express.Response, extra: { notice?: string; error?: string } = {}): Promise<void> {
+  const company = res.locals.company;
+  const tz = company.timezone;
+  const month = resolvePeriod("mes_atual", {}, tz);
+  const week = resolvePeriod("7d", {}, tz);
+  const bi = await computeCompanyBi(company.id, tz, month, EMPTY_FILTERS);
+  const bi7 = await computeCompanyBi(company.id, tz, week, EMPTY_FILTERS);
+  const goals = await getGoals(company.id);
+  const scored = await scoreLeads(company.id);
+  res.send(
+    intelligencePage({
+      company,
+      user: res.locals.user,
+      role: res.locals.membership.role,
+      canViewMarketing: canViewMarketing(res),
+      bi,
+      bi7,
+      goals,
+      projection: projectMonth(bi.current, goals, tz),
+      attention: await evaluateAlerts(company.id, bi7),
+      bottlenecks: detectBottlenecks(bi.current),
+      hot: hotLeads(scored),
+      stalled: stalledOpportunities(scored),
+      health: await healthScore(company.id, bi, goals),
+      summary: executiveSummary(bi7),
+      costQuality: costVsQuality(bi.campaigns),
+      funnel: executiveFunnel(bi.current),
+      ...extra,
+    })
+  );
+}
+
+app.get("/empresa/:companyId/inteligencia", requireMarketingAccess, async (req, res) => renderIntelligence(req, res));
+
+app.post("/empresa/:companyId/inteligencia/metas", requireCompanyAccess, async (req, res) => {
+  const company = res.locals.company;
+  if (res.locals.membership.role !== "COMPANY_ADMIN") {
+    res.status(403).send("Apenas o administrador da empresa pode definir metas.");
+    return;
+  }
+  const b = req.body as Record<string, string | undefined>;
+  const cents = (v?: string) => (v && v.trim() ? parseReais(v) : null);
+  const int = (v?: string) => (v && v.trim() && Number.isFinite(Number(v)) ? Math.max(0, Math.round(Number(v))) : null);
+  await saveGoals(company.id, {
+    revenue_cents: cents(b.revenue),
+    new_customers: int(b.new_customers),
+    leads: int(b.leads),
+    qualified_leads: int(b.qualified_leads),
+    appointments: int(b.appointments),
+    attendances: int(b.attendances),
+    max_cac_cents: cents(b.max_cac),
+    max_cpl_cents: cents(b.max_cpl),
+    min_roas: b.min_roas && b.min_roas.trim() ? Number(b.min_roas.replace(",", ".")) : null,
+    planned_monthly_spend_cents: cents(b.planned_spend),
+  });
+  await audit("metas_atualizadas", { companyId: company.id, userId: res.locals.user.id, ip: clientIp(req) });
+  await renderIntelligence(req, res, { notice: "Metas salvas." });
+});
+
+// --- Alertas por empresa -----------------------------------------------------------------
+
+app.get("/empresa/:companyId/alertas", requireMarketingAccess, async (req, res) => {
+  const company = res.locals.company;
+  const q = req.query as { status?: string };
+  const status = (["ABERTO", "EM_ANALISE", "RESOLVIDO", "IGNORADO", "TODOS"] as (AlertStatus | "TODOS")[]).includes(q.status as any) ? (q.status as AlertStatus | "TODOS") : "ABERTO";
+  res.send(
+    alertsPage({
+      company,
+      user: res.locals.user,
+      role: res.locals.membership.role,
+      canViewMarketing: canViewMarketing(res),
+      alerts: await listAlerts(company.id, status),
+      status,
+      members: await listCompanyMembers(company.id),
+    })
+  );
+});
+
+app.post("/empresa/:companyId/alertas/:alertId/status", requireMarketingAccess, async (req, res) => {
+  const company = res.locals.company;
+  const { status, assignee } = req.body as { status?: string; assignee?: string };
+  const valid = (["ABERTO", "EM_ANALISE", "RESOLVIDO", "IGNORADO"] as AlertStatus[]).includes(status as AlertStatus);
+  if (valid) {
+    const members = await listCompanyMembers(company.id);
+    const assigneeId = assignee && members.some((m) => m.user_id === Number(assignee)) ? Number(assignee) : null;
+    await updateAlertStatus(company.id, Number(req.params.alertId), status as AlertStatus, assigneeId);
+  }
+  res.redirect(`/empresa/${company.id}/alertas`);
+});
+
+// ============================================================================
+// ADMINISTRAÇÃO GERAL — Integrações (OAuth Meta/Google), Marketing agregado,
+// Agência. Só requirePlatformAdmin; todas as ações auditadas; nenhum token
+// devolvido ao navegador; nenhuma operação de escrita nas plataformas.
+// ============================================================================
+
+const providerFetch = (url: string, init?: any) => fetch(url, init) as any;
+
+async function renderIntegrations(res: express.Response, extra: { notice?: string; error?: string } = {}): Promise<void> {
+  const companies = await listCompaniesForAdmin();
+  const whatsapp = await Promise.all(
+    companies.map(async (c) => {
+      const row = await findConnectionByCompanyId(c.id);
+      return { company: c, connection: row ? toAdminViewModel(row) : null };
+    })
+  );
+  res.send(
+    adminIntegrationsPage({
+      meta: metaOAuthConfig(publicBaseUrl()),
+      google: googleOAuthConfig(publicBaseUrl()),
+      encryptionConfigured: isCredentialEncryptionConfigured(),
+      connections: (await listConnections()).map(toConnectionView),
+      accounts: await listAllAccounts(),
+      companies,
+      whatsapp,
+      syncIntervalMinutes: syncIntervalMinutes(),
+      ...extra,
+    })
+  );
+}
+
+app.get("/admin/integracoes", requirePlatformAdmin, async (_req, res) => renderIntegrations(res));
+
+app.post("/admin/integracoes/meta/conectar", requirePlatformAdmin, async (req, res) => {
+  const cfg = metaOAuthConfig(publicBaseUrl());
+  if (!cfg.configured || !isCredentialEncryptionConfigured()) {
+    await renderIntegrations(res, { error: "Meta Ads não configurado no servidor (variáveis ausentes)." });
+    return;
+  }
+  const { state } = await createOAuthState("META", res.locals.user.id);
+  await audit("oauth_iniciado", { userId: res.locals.user.id, detail: `META (escopos: ${metaScopes()})`, ip: clientIp(req) });
+  res.redirect(buildMetaAuthorizeUrl(cfg, state));
+});
+
+app.get("/admin/integracoes/meta/callback", requirePlatformAdmin, async (req, res) => {
+  const q = req.query as Record<string, string | undefined>;
+  const cfg = metaOAuthConfig(publicBaseUrl());
+  const st = await consumeOAuthState("META", q.state, res.locals.user.id);
+  if (!st.ok) {
+    await audit("oauth_falhou", { userId: res.locals.user.id, detail: `META: ${st.error}`, ip: clientIp(req) });
+    await renderIntegrations(res, { error: "Autorização inválida ou expirada. Inicie a conexão de novo." });
+    return;
+  }
+  if (q.error || !q.code || !cfg.configured) {
+    await audit("oauth_falhou", { userId: res.locals.user.id, detail: `META: ${sanitizeText(q.error_description ?? q.error ?? "sem código")}`, ip: clientIp(req) });
+    await renderIntegrations(res, { error: "A Meta não concluiu a autorização. Tente novamente ou verifique as permissões do aplicativo." });
+    return;
+  }
+  try {
+    const token = await metaExchangeCode(providerFetch, cfg.clientId!, process.env.META_APP_SECRET!, cfg.redirectUri, q.code);
+    const me = await metaGetMe(providerFetch, token.accessToken);
+    const id = await createConnection({ provider: "META", externalUserId: me.id, displayName: me.name, scopes: metaScopes(), accessToken: token.accessToken, refreshToken: null, expiresAt: token.expiresAt, createdByUserId: res.locals.user.id });
+    await audit("oauth_concluido", { userId: res.locals.user.id, detail: `META conexão #${id} (${me.name ?? me.id})`, ip: clientIp(req) });
+    await renderIntegrations(res, { notice: `Meta Ads conectado (${me.name ?? me.id}). Clique em "Listar contas" para descobrir as contas de anúncio.` });
+  } catch (err) {
+    const msg = err instanceof ProviderError ? err.sanitized : sanitizeText(err instanceof Error ? err.message : String(err));
+    await audit("oauth_falhou", { userId: res.locals.user.id, detail: `META: ${msg}`, ip: clientIp(req) });
+    await renderIntegrations(res, { error: `Não foi possível concluir a conexão com a Meta: ${msg}` });
+  }
+});
+
+app.post("/admin/integracoes/google/conectar", requirePlatformAdmin, async (req, res) => {
+  const cfg = googleOAuthConfig(publicBaseUrl());
+  if (!cfg.configured || !isCredentialEncryptionConfigured()) {
+    await renderIntegrations(res, { error: "Google Ads não configurado no servidor (variáveis ausentes)." });
+    return;
+  }
+  const { state, codeChallenge } = await createOAuthState("GOOGLE", res.locals.user.id);
+  await audit("oauth_iniciado", { userId: res.locals.user.id, detail: "GOOGLE (adwords, PKCE)", ip: clientIp(req) });
+  res.redirect(buildGoogleAuthorizeUrl(cfg, state, codeChallenge!));
+});
+
+app.get("/admin/integracoes/google/callback", requirePlatformAdmin, async (req, res) => {
+  const q = req.query as Record<string, string | undefined>;
+  const cfg = googleOAuthConfig(publicBaseUrl());
+  const st = await consumeOAuthState("GOOGLE", q.state, res.locals.user.id);
+  if (!st.ok) {
+    await audit("oauth_falhou", { userId: res.locals.user.id, detail: `GOOGLE: ${st.error}`, ip: clientIp(req) });
+    await renderIntegrations(res, { error: "Autorização inválida ou expirada. Inicie a conexão de novo." });
+    return;
+  }
+  if (q.error || !q.code || !cfg.configured) {
+    await audit("oauth_falhou", { userId: res.locals.user.id, detail: `GOOGLE: ${sanitizeText(q.error ?? "sem código")}`, ip: clientIp(req) });
+    await renderIntegrations(res, { error: "O Google não concluiu a autorização. Tente novamente." });
+    return;
+  }
+  try {
+    const token = await googleExchangeCode(providerFetch, cfg.clientId!, process.env.GOOGLE_CLIENT_SECRET!, cfg.redirectUri, q.code, st.codeVerifier ?? null);
+    const id = await createConnection({ provider: "GOOGLE", externalUserId: null, displayName: "Conta Google", scopes: "adwords", accessToken: token.accessToken, refreshToken: token.refreshToken, expiresAt: token.expiresAt, createdByUserId: res.locals.user.id });
+    await audit("oauth_concluido", { userId: res.locals.user.id, detail: `GOOGLE conexão #${id}${token.refreshToken ? "" : " (SEM refresh token — reconexão será necessária ao expirar)"}`, ip: clientIp(req) });
+    await renderIntegrations(res, { notice: `Google Ads conectado. Clique em "Listar contas" para descobrir as contas acessíveis.` });
+  } catch (err) {
+    const msg = err instanceof ProviderError ? err.sanitized : sanitizeText(err instanceof Error ? err.message : String(err));
+    await audit("oauth_falhou", { userId: res.locals.user.id, detail: `GOOGLE: ${msg}`, ip: clientIp(req) });
+    await renderIntegrations(res, { error: `Não foi possível concluir a conexão com o Google: ${msg}` });
+  }
+});
+
+/** Descobre as contas de anúncio acessíveis pela conexão (leitura) e grava em marketing_accounts, sem vincular a empresa. */
+app.post("/admin/integracoes/conexoes/:id/descobrir", requirePlatformAdmin, async (req, res) => {
+  const connection = await getConnection(Number(req.params.id));
+  if (!connection || connection.status === "REVOGADA") {
+    await renderIntegrations(res, { error: "Conexão não encontrada ou revogada." });
+    return;
+  }
+  const throttle = checkActionThrottle("marketing_descobrir", clientIp(req), connection.id, 10);
+  if (!throttle.allowed) {
+    await renderIntegrations(res, { error: `Muitas tentativas. Tente em ${throttle.retryAfterMinutes} min.` });
+    return;
+  }
+  recordAction("marketing_descobrir", clientIp(req), connection.id);
+  try {
+    const tokens = await decryptConnectionTokens(connection.id);
+    if (!tokens.accessToken) throw new ProviderError("AUTH_EXPIRED", "Conexão sem token — reconecte.");
+    let count = 0;
+    if (connection.provider === "META") {
+      for (const a of await metaListAdAccounts(providerFetch, tokens.accessToken)) {
+        await upsertAccount({ connectionId: connection.id, provider: "META", ...a });
+        count += 1;
+      }
+    } else {
+      const ids = await googleListAccessibleCustomers(providerFetch, tokens.accessToken);
+      for (const cid of ids) {
+        const customer = await googleGetCustomer(providerFetch, tokens.accessToken, cid, null);
+        if (!customer) continue;
+        await upsertAccount({ connectionId: connection.id, provider: "GOOGLE", ...customer });
+        count += 1;
+        if (customer.isManager) {
+          for (const client of await googleListCustomerClients(providerFetch, tokens.accessToken, cid)) {
+            await upsertAccount({ connectionId: connection.id, provider: "GOOGLE", ...client });
+            count += 1;
+          }
+        }
+      }
+    }
+    await audit("marketing_contas_descobertas", { userId: res.locals.user.id, detail: `${connection.provider} conexão #${connection.id}: ${count} conta(s)`, ip: clientIp(req) });
+    await renderIntegrations(res, { notice: `${count} conta(s) encontrada(s). Vincule cada uma à empresa correta.` });
+  } catch (err) {
+    const msg = err instanceof ProviderError ? err.sanitized : sanitizeText(err instanceof Error ? err.message : String(err));
+    await audit("marketing_contas_descobertas_falhou", { userId: res.locals.user.id, detail: `${connection.provider}: ${msg}`, ip: clientIp(req) });
+    await renderIntegrations(res, { error: msg });
+  }
+});
+
+app.post("/admin/integracoes/conexoes/:id/revogar", requirePlatformAdmin, async (req, res) => {
+  const connection = await getConnection(Number(req.params.id));
+  if (!connection) {
+    await renderIntegrations(res, { error: "Conexão não encontrada." });
+    return;
+  }
+  await revokeConnection(connection.id);
+  await audit("integracao_removida", { userId: res.locals.user.id, detail: `${connection.provider} conexão #${connection.id} revogada (tokens apagados)`, ip: clientIp(req) });
+  await renderIntegrations(res, { notice: "Conexão revogada e tokens apagados. Para parar o acesso do lado da plataforma, remova também o aplicativo nas configurações da sua conta Meta/Google." });
+});
+
+app.post("/admin/integracoes/contas/:id/vincular", requirePlatformAdmin, async (req, res) => {
+  const { company_id, sync } = req.body as { company_id?: string; sync?: string };
+  const account = await getAccount(Number(req.params.id));
+  if (!account || !company_id) {
+    await renderIntegrations(res, { error: "Escolha uma empresa." });
+    return;
+  }
+  const previous = account.company_id;
+  const result = await linkAccountToCompany(account.id, Number(company_id), sync === "1");
+  if (!result.ok) {
+    await renderIntegrations(res, { error: result.error });
+    return;
+  }
+  const company = await findCompanyById(Number(company_id));
+  await audit(previous && previous !== Number(company_id) ? "marketing_conta_reatribuida" : "marketing_conta_vinculada", {
+    companyId: Number(company_id),
+    userId: res.locals.user.id,
+    detail: `${account.provider} ${account.name ?? account.external_account_id}${previous && previous !== Number(company_id) ? ` (antes: empresa #${previous})` : ""}, sync ${sync === "1" ? "ligada" : "desligada"}`,
+    ip: clientIp(req),
+  });
+  await renderIntegrations(res, { notice: `Conta vinculada a "${company?.name ?? company_id}".` });
+});
+
+app.post("/admin/integracoes/contas/:id/desvincular", requirePlatformAdmin, async (req, res) => {
+  const account = await getAccount(Number(req.params.id));
+  if (!account) {
+    await renderIntegrations(res, { error: "Conta não encontrada." });
+    return;
+  }
+  await unlinkAccount(account.id);
+  await audit("marketing_conta_desvinculada", { companyId: account.company_id, userId: res.locals.user.id, detail: `${account.provider} ${account.name ?? account.external_account_id}`, ip: clientIp(req) });
+  await renderIntegrations(res, { notice: "Conta desvinculada. Campanhas e métricas dela deixaram de aparecer para a empresa." });
+});
+
+app.post("/admin/integracoes/contas/:id/sincronizar", requirePlatformAdmin, async (req, res) => {
+  const account = await getAccount(Number(req.params.id));
+  if (!account) {
+    await renderIntegrations(res, { error: "Conta não encontrada." });
+    return;
+  }
+  const result = await syncAccount(account.id, "MANUAL", res.locals.user.id, publicBaseUrl());
+  await renderIntegrations(res, result.ok ? { notice: `Sincronização concluída: ${result.processed} registro(s) (${result.windowFrom} a ${result.windowTo}).` } : { error: result.error });
+});
+
+app.post("/admin/integracoes/sincronizar-tudo", requirePlatformAdmin, async (req, res) => {
+  const throttle = checkActionThrottle("marketing_sync_all", clientIp(req), "global", 6);
+  if (!throttle.allowed) {
+    await renderIntegrations(res, { error: `Aguarde ${throttle.retryAfterMinutes} min para sincronizar tudo de novo.` });
+    return;
+  }
+  recordAction("marketing_sync_all", clientIp(req), "global");
+  const results = await syncAllEnabled("MANUAL", res.locals.user.id, publicBaseUrl());
+  const ok = results.filter((r) => r.ok).length;
+  await renderIntegrations(res, { notice: `${ok} de ${results.length} conta(s) sincronizada(s) com sucesso.` });
+});
+
+/** Resumo por empresa para os painéis agregados (30 dias). */
+async function companySummaries(): Promise<CompanySummary[]> {
+  const companies = await listCompaniesForAdmin();
+  const out: CompanySummary[] = [];
+  for (const company of companies) {
+    const period = resolvePeriod("30d", {}, company.timezone);
+    const bi = await computeCompanyBi(company.id, company.timezone, period, EMPTY_FILTERS);
+    const goals = await getGoals(company.id);
+    const wa = await findConnectionByCompanyId(company.id);
+    out.push({ company, bi, health: await healthScore(company.id, bi, goals), goals, accounts: await listAccountsForCompany(company.id), whatsapp: wa ? toAdminViewModel(wa) : null });
+  }
+  return out;
+}
+
+app.get("/admin/marketing", requirePlatformAdmin, async (_req, res) => {
+  res.send(adminMarketingPage({ summaries: await companySummaries(), periodLabel: "últimos 30 dias", syncRuns: await listSyncRuns(40), openAlerts: await listAlertsAllCompanies(), rules: await listGlobalRules() }));
+});
+
+app.post("/admin/alertas/regras", requirePlatformAdmin, async (req, res) => {
+  const body = req.body as Record<string, string | undefined>;
+  for (const rule of RULE_KINDS) {
+    const raw = body[rule.kind];
+    if (raw === undefined || !raw.trim()) continue;
+    const n = Number(raw.replace(",", "."));
+    if (!Number.isFinite(n) || n < 0) continue;
+    await saveThreshold(null, rule.kind, rule.kind === "spendWithoutLeadCents" ? Math.round(n * 100) : n);
+  }
+  await audit("alertas_regras_atualizadas", { userId: res.locals.user.id, ip: clientIp(req) });
+  res.send(adminMarketingPage({ summaries: await companySummaries(), periodLabel: "últimos 30 dias", syncRuns: await listSyncRuns(40), openAlerts: await listAlertsAllCompanies(), rules: await listGlobalRules(), notice: "Limiares salvos." }));
+});
+
+app.get("/admin/agencia", requirePlatformAdmin, async (req, res) => {
+  const q = req.query as { ordenar?: string };
+  res.send(adminAgencyPage({ summaries: await companySummaries(), periodLabel: "últimos 30 dias", sort: q.ordenar && /^[a-z_]+$/.test(q.ordenar) ? q.ordenar : null }));
+});
+
+/** Visão da empresa para o administrador geral (sem entrar nas telas operacionais da empresa). */
+app.get("/admin/agencia/empresa/:companyId", requirePlatformAdmin, async (req, res) => {
+  const company = await findCompanyById(Number(req.params.companyId));
+  if (!company) {
+    res.status(404).send("Empresa não encontrada.");
+    return;
+  }
+  const q = req.query as Record<string, string | undefined>;
+  const period = resolvePeriod(q.periodo, { from: q.de, to: q.ate }, company.timezone);
+  const bi: CompanyBi = await computeCompanyBi(company.id, company.timezone, period, parseFilters(q));
+  const attention = await buildAttention(company.id, bi);
+  res.send(
+    htmlPage(
+      `${company.name} — Agência`,
+      `<div style="max-width:1200px;margin:0 auto;padding:1.5rem">
+        <div class="page-head"><div><div class="eyebrow">HUB ACTION · Agência</div><h2>${company.name.replace(/</g, "&lt;")}</h2><div class="sub">${bi.period.label} · comparado com ${bi.period.previousLabel}</div></div><a href="/admin/agencia" class="btn btn-small">&larr; Carteira</a></div>
+        ${executiveCards(bi)}
+        <div class="grid-12"><div class="col-6"><div class="card-block"><h3>Funil</h3>${funnelBlock(executiveFunnel(bi.current), company.id, "", false)}</div></div><div class="col-6"><div class="card-block"><h3>Meta Ads x Google Ads</h3>${providerComparisonBlock(bi)}</div></div></div>
+        <div class="card-block"><h3>Custo de aquisição</h3>${secondaryKpis(bi)}</div>
+        <div class="card-block"><h3>Campanhas</h3>${campaignsTable(bi.campaigns, company.id, "", company.timezone, null)}</div>
+        <div class="card-block"><h3>Precisa de atenção</h3>${attentionBlock(attention)}</div>
+      </div>`
+    )
   );
 });
 
@@ -1219,6 +1824,7 @@ app.use((err: unknown, _req: express.Request, res: express.Response, _next: expr
 
 async function main(): Promise<void> {
   await runMigrations();
+  startSyncScheduler(publicBaseUrl());
   app.listen(PORT, () => {
     console.log(`HUB ACTION - CRM WhatsApp rodando em http://localhost:${PORT} (banco: ${db.dialect})`);
   });

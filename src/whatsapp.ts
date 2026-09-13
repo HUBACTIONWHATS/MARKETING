@@ -519,6 +519,8 @@ export interface InboundTextMessage {
   supported: boolean;
   /** true para clique em botão/lista oficial da plataforma (gatilho B — "se esse evento existir"). */
   isInteractiveReply: boolean;
+  /** Objeto `referral` oficial (anúncio "Clique para o WhatsApp"): fonte de atribuição CONFIRMADA — ver attribution.ts. */
+  referral: unknown | null;
 }
 
 export interface DeliveryStatusEvent {
@@ -581,6 +583,7 @@ export function parseWebhookPayload(body: any): ParsedWebhookEntry[] {
           body: text,
           supported,
           isInteractiveReply,
+          referral: message.referral ?? null,
         });
       }
 

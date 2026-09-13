@@ -13,6 +13,7 @@ import type { OpportunityWithDetails, PipelineStage } from "./crm";
 import { STATUS_LABELS, type ConnectionAdminView, type ConnectionStatusReport } from "./whatsapp";
 import type { DashboardData, DashboardFilters } from "./dashboard";
 import type { AuditEntry } from "./access";
+import { CONFIDENCE_LABELS, LEAD_SOURCES, SOURCE_LABELS, type AttributionConfidence, type LeadSource } from "./attribution";
 import type { Company, CompanyAdminRow, CompanyPlan, CompanyUserRow, MembershipWithCompany, Role, User } from "./models";
 
 type PendingInvite = { email: string; role: Role; expires_at: string };
@@ -276,6 +277,95 @@ const BASE_STYLE = `
   .filters-form { display: flex; gap: 0.75rem; flex-wrap: wrap; align-items: end; margin-bottom: 1.25rem; }
   .filters-form .field { margin-bottom: 0; min-width: 150px; }
 
+  /* ---------- Command Center: design system evoluído ---------- */
+  :root {
+    --bg: #0f172a; --surface: #111827; --surface-2: #0b1220; --border: #1f2937; --border-strong: #334155;
+    --text: #f8fafc; --text-2: #cbd5e1; --muted: #94a3b8; --muted-2: #64748b;
+    --accent: #38bdf8; --positive: #4ade80; --warning: #fbbf24; --danger: #f87171;
+    --meta: #a78bfa; --google: #fb923c;
+    --radius: 10px; --radius-sm: 6px;
+  }
+  .page-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 1rem; flex-wrap: wrap; margin-bottom: 1.25rem; }
+  .page-head h2 { margin: 0; font-size: 1.35rem; letter-spacing: -0.01em; }
+  .page-head .sub { color: var(--muted); font-size: 0.85rem; margin-top: 0.2rem; }
+  .eyebrow { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
+  .grid-12 { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: 1rem; }
+  .col-12 { grid-column: span 12; } .col-8 { grid-column: span 8; } .col-6 { grid-column: span 6; } .col-4 { grid-column: span 4; } .col-3 { grid-column: span 3; }
+  .kpi-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.75rem; margin-bottom: 1rem; }
+  .kpi { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.85rem 0.95rem; min-height: 96px; display: flex; flex-direction: column; gap: 0.25rem; position: relative; }
+  .kpi .kpi-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; display: flex; justify-content: space-between; gap: 0.4rem; }
+  .kpi .kpi-value { font-size: 1.45rem; font-weight: 700; letter-spacing: -0.02em; line-height: 1.1; font-variant-numeric: tabular-nums; }
+  .kpi .kpi-delta { font-size: 0.75rem; color: var(--muted); display: flex; align-items: center; gap: 0.35rem; }
+  .kpi .kpi-delta.up { color: var(--positive); } .kpi .kpi-delta.down { color: var(--danger); } .kpi .kpi-delta.up.bad { color: var(--danger); } .kpi .kpi-delta.down.good { color: var(--positive); }
+  .kpi .sparkline { width: 100%; height: 26px; margin-top: auto; opacity: 0.9; }
+  .kpi.kpi-secondary { min-height: 74px; } .kpi.kpi-secondary .kpi-value { font-size: 1.15rem; }
+  .tip { position: relative; cursor: help; border-bottom: 1px dotted var(--muted-2); }
+  .tip::after { content: attr(data-tip); position: absolute; left: 0; top: 100%; z-index: 20; width: max-content; max-width: 260px; background: #020617; color: var(--text-2); border: 1px solid var(--border-strong); border-radius: var(--radius-sm); padding: 0.45rem 0.6rem; font-size: 0.72rem; font-weight: 400; text-transform: none; letter-spacing: 0; white-space: normal; line-height: 1.35; opacity: 0; pointer-events: none; transition: opacity 0.12s; margin-top: 0.3rem; }
+  .tip:hover::after, .tip:focus::after { opacity: 1; }
+  .card-block { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 1rem 1.1rem; margin-bottom: 1rem; }
+  .card-block > h3 { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); margin: 0 0 0.75rem; display: flex; justify-content: space-between; align-items: center; gap: 0.5rem; }
+  .card-block > h3 .actions { display: flex; gap: 0.4rem; text-transform: none; letter-spacing: 0; }
+  .chart { width: 100%; } .chart-svg { width: 100%; height: auto; display: block; }
+  .chart-legend { display: flex; gap: 1rem; flex-wrap: wrap; font-size: 0.75rem; color: var(--muted); margin-bottom: 0.5rem; }
+  .legend-item { display: inline-flex; align-items: center; gap: 0.35rem; } .legend-swatch { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+  .chart-empty { border: 1px dashed var(--border-strong); border-radius: var(--radius); padding: 1.5rem; text-align: center; color: var(--muted); font-size: 0.85rem; }
+  .funnel { display: flex; flex-direction: column; gap: 0.35rem; }
+  .funnel-row { display: grid; grid-template-columns: 1fr 220px; gap: 0.75rem; align-items: center; }
+  .funnel-bar { height: 34px; background: linear-gradient(90deg, rgba(56,189,248,0.55), rgba(56,189,248,0.2)); border-radius: 4px; min-width: 6%; }
+  .funnel-link, .funnel-row > div:first-child { position: relative; display: block; text-decoration: none; color: inherit; }
+  .funnel-text { position: absolute; left: 0.6rem; top: 0; height: 34px; display: flex; align-items: center; gap: 0.4rem; font-size: 0.85rem; white-space: nowrap; }
+  .funnel-conv { font-size: 0.78rem; color: var(--text-2); font-variant-numeric: tabular-nums; }
+  .funnel-loss { color: var(--warning); margin-left: 0.4rem; }
+  .data-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+  .data-table { width: 100%; border-collapse: collapse; font-size: 0.8rem; min-width: 900px; }
+  .data-table th { position: sticky; top: 0; background: #0b1220; color: var(--muted); font-weight: 600; text-transform: uppercase; font-size: 0.66rem; letter-spacing: 0.05em; text-align: right; padding: 0.55rem 0.6rem; border-bottom: 1px solid var(--border-strong); white-space: nowrap; }
+  .data-table th:first-child, .data-table td:first-child, .data-table th.left, .data-table td.left { text-align: left; }
+  .data-table td { padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .data-table tr:hover td { background: rgba(56,189,248,0.04); }
+  .data-table a { color: var(--text); text-decoration: none; } .data-table a:hover { color: var(--accent); }
+  .data-table th a { color: inherit; }
+  .chip { display: inline-flex; align-items: center; gap: 0.3rem; font-size: 0.68rem; font-weight: 600; padding: 0.15rem 0.5rem; border-radius: 999px; border: 1px solid var(--border-strong); color: var(--text-2); white-space: nowrap; }
+  .chip-meta { color: var(--meta); border-color: rgba(167,139,250,0.4); } .chip-google { color: var(--google); border-color: rgba(251,146,60,0.4); }
+  .chip-ok { color: var(--positive); border-color: rgba(74,222,128,0.35); } .chip-warn { color: var(--warning); border-color: rgba(251,191,36,0.35); } .chip-bad { color: var(--danger); border-color: rgba(248,113,113,0.35); } .chip-muted { color: var(--muted); }
+  .sev { display: inline-block; font-size: 0.66rem; font-weight: 700; padding: 0.15rem 0.5rem; border-radius: 4px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .sev-CRITICO { background: rgba(248,113,113,0.15); color: var(--danger); } .sev-ATENCAO { background: rgba(251,191,36,0.15); color: var(--warning); }
+  .sev-OPORTUNIDADE { background: rgba(74,222,128,0.15); color: var(--positive); } .sev-INFORMACAO { background: rgba(148,163,184,0.15); color: var(--muted); }
+  .attention-list { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 0.5rem; }
+  .attention-list li { border: 1px solid var(--border); border-radius: var(--radius-sm); padding: 0.65rem 0.8rem; display: grid; grid-template-columns: 110px 1fr; gap: 0.75rem; align-items: start; font-size: 0.85rem; }
+  .attention-list .fact { color: var(--text); } .attention-list .hyp { color: var(--muted); font-size: 0.78rem; margin-top: 0.2rem; }
+  .semaforo { display: inline-block; width: 12px; height: 12px; border-radius: 50%; }
+  .semaforo-VERDE { background: var(--positive); } .semaforo-AMARELO { background: var(--warning); } .semaforo-VERMELHO { background: var(--danger); } .semaforo-CINZA { background: var(--muted-2); }
+  .tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid var(--border); margin-bottom: 1.25rem; overflow-x: auto; }
+  .tabs a { padding: 0.55rem 0.9rem; color: var(--muted); text-decoration: none; font-size: 0.85rem; font-weight: 500; border-bottom: 2px solid transparent; white-space: nowrap; }
+  .tabs a.active { color: var(--text); border-bottom-color: var(--accent); }
+  .filter-bar { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: end; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 0.75rem 0.9rem; margin-bottom: 1.25rem; }
+  .filter-bar .field { margin: 0; min-width: 140px; } .filter-bar select, .filter-bar input { font-size: 0.82rem; padding: 0.4rem 0.5rem; }
+  .filter-bar .btn { align-self: end; }
+  .preset-links { display: flex; gap: 0.3rem; flex-wrap: wrap; } .preset-links a { font-size: 0.75rem; padding: 0.3rem 0.55rem; border-radius: 999px; border: 1px solid var(--border-strong); color: var(--text-2); text-decoration: none; }
+  .preset-links a.active { background: var(--accent); color: #0f172a; border-color: var(--accent); }
+  .freshness { font-size: 0.75rem; color: var(--muted); display: inline-flex; align-items: center; gap: 0.35rem; }
+  .freshness .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--positive); display: inline-block; } .freshness.stale .dot { background: var(--warning); } .freshness.none .dot { background: var(--muted-2); }
+  .goal-row { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr 1fr 1fr; gap: 0.5rem; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid var(--border); font-size: 0.82rem; font-variant-numeric: tabular-nums; }
+  .goal-row:last-child { border-bottom: none; } .goal-row .bar { height: 6px; border-radius: 3px; background: var(--border-strong); position: relative; overflow: hidden; }
+  .goal-row .bar > span { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); }
+  .provider-compare { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+  .provider-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 0.9rem 1rem; }
+  .provider-card h4 { margin: 0 0 0.6rem; font-size: 0.95rem; display: flex; align-items: center; gap: 0.5rem; }
+  .provider-card dl { display: grid; grid-template-columns: 1fr auto; gap: 0.25rem 1rem; margin: 0; font-size: 0.82rem; } .provider-card dt { color: var(--muted); } .provider-card dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+  .skeleton { background: linear-gradient(90deg, #1e293b 25%, #273449 50%, #1e293b 75%); background-size: 200% 100%; border-radius: 4px; min-height: 1em; }
+  .notice-box { border: 1px solid rgba(251,191,36,0.35); background: rgba(251,191,36,0.06); color: #fde68a; border-radius: var(--radius-sm); padding: 0.6rem 0.8rem; font-size: 0.8rem; margin-bottom: 1rem; }
+  .muted { color: var(--muted); } .small { font-size: 0.78rem; } .num { font-variant-numeric: tabular-nums; }
+  .btn:disabled, .btn[aria-disabled="true"] { opacity: 0.5; cursor: not-allowed; }
+  .sidebar nav .nav-group { font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted-2); padding: 0.75rem 0.6rem 0.25rem; }
+
+  @media (max-width: 960px) {
+    .col-8, .col-6, .col-4, .col-3 { grid-column: span 12; }
+    .provider-compare { grid-template-columns: 1fr; }
+    .goal-row { grid-template-columns: 1fr 1fr 1fr; }
+    .funnel-row { grid-template-columns: 1fr; gap: 0.15rem; }
+    .attention-list li { grid-template-columns: 1fr; }
+  }
+
   @media (max-width: 720px) {
     .layout { flex-direction: column; }
     .sidebar { width: 100%; border-right: none; border-bottom: 1px solid #1f2937; padding: 0.75rem; }
@@ -288,7 +378,7 @@ const BASE_STYLE = `
   }
 `;
 
-function page(title: string, body: string): string {
+export function page(title: string, body: string): string {
   return `<!doctype html>
 <html lang="pt-BR">
 <head>
@@ -523,7 +613,10 @@ export function adminPage(opts: {
     <div style="max-width:1000px;margin:0 auto;padding:1.5rem">
       <div class="toolbar">
         <h2 style="margin:0">Administração Hub Action</h2>
-        <div style="display:flex;gap:0.5rem">
+        <div style="display:flex;gap:0.5rem;flex-wrap:wrap">
+          <a href="/admin/integracoes" class="btn btn-small">Integrações</a>
+          <a href="/admin/marketing" class="btn btn-small">Marketing</a>
+          <a href="/admin/agencia" class="btn btn-small">Agência</a>
           <a href="/admin/whatsapp" class="btn btn-small">Conexões do WhatsApp</a>
           <a href="/admin/log" class="btn btn-small">Log de auditoria</a>
           <form method="post" action="/logout"><button type="submit" class="btn btn-small">Sair</button></form>
@@ -720,6 +813,13 @@ export const NAV_ITEMS: NavItem[] = [
   { key: "configuracoes", label: "Configurações" },
 ];
 
+/** Itens de mídia paga/inteligência: administrador da empresa sempre; atendente só com a capability can_view_marketing. */
+export const MARKETING_NAV_ITEMS: NavItem[] = [
+  { key: "marketing", label: "Marketing" },
+  { key: "inteligencia", label: "Inteligência" },
+  { key: "alertas", label: "Alertas" },
+];
+
 const ROLE_LABEL: Record<Role, string> = {
   COMPANY_ADMIN: "Administrador da empresa",
   AGENT: "Atendente",
@@ -731,11 +831,14 @@ export function appShell(opts: {
   role: Role;
   active: string;
   body: string;
+  /** Mostra Marketing/Inteligência/Alertas no menu (decidido no servidor, não no navegador). */
+  canViewMarketing?: boolean;
 }): string {
-  const nav = NAV_ITEMS.map(
-    (item) =>
-      `<a href="/empresa/${opts.company.id}/${item.key}" class="${item.key === opts.active ? "active" : ""}">${item.label}</a>`
-  ).join("");
+  const link = (item: NavItem) => `<a href="/empresa/${opts.company.id}/${item.key}" class="${item.key === opts.active ? "active" : ""}">${item.label}</a>`;
+  const showMarketing = opts.canViewMarketing ?? opts.role === "COMPANY_ADMIN";
+  const nav =
+    NAV_ITEMS.map(link).join("") +
+    (showMarketing ? `<div class="nav-group">Performance</div>${MARKETING_NAV_ITEMS.map(link).join("")}` : "");
 
   // Modo de demonstração: mesmo critério do simulador (fora de produção, tudo é dado fictício).
   const demoBanner = IS_DEMO
@@ -1201,6 +1304,16 @@ export function crmPage(opts: {
       const cards = items
         .map((o) => {
           const scheduled = formatDateShort(o.scheduled_at, tz);
+          const attended = formatDateShort(o.attended_at, tz);
+          const sourceLabel = SOURCE_LABELS[o.contact_source as LeadSource] ?? o.contact_source;
+          const confidenceCls = o.contact_confidence === "CONFIRMADA" ? "badge-humano" : o.contact_confidence === "PROVAVEL" ? "badge-aguardando" : "badge-encerrado";
+          const originForm =
+            o.contact_confidence === "CONFIRMADA"
+              ? ""
+              : `<form method="post" action="/empresa/${opts.company.id}/crm/contatos/${o.contact_id}/origem" class="inline-form" style="margin-top:0.35rem;max-width:360px">
+                  <select name="source" style="flex:1">${LEAD_SOURCES.map((s) => `<option value="${s}" ${s === o.contact_source ? "selected" : ""}>${escapeHtml(SOURCE_LABELS[s])}</option>`).join("")}</select>
+                  <button type="submit" class="btn btn-small">Declarar origem</button>
+                </form>`;
           return `<div class="opp-card">
             <div class="title">${escapeHtml(o.title)}</div>
             <div class="meta-row">
@@ -1208,6 +1321,8 @@ export function crmPage(opts: {
               <span>${formatCurrencyCents(o.value_cents)}</span>
               <span>${o.responsible_name ? escapeHtml(o.responsible_name) : "Sem responsável"}</span>
               ${scheduled ? `<span>Agendado: ${scheduled}</span>` : ""}
+              ${attended ? `<span>Compareceu: ${attended}</span>` : ""}
+              <span>Origem: ${escapeHtml(sourceLabel)} <span class="badge ${confidenceCls}" title="Confiança da atribuição">${escapeHtml(CONFIDENCE_LABELS[o.contact_confidence as AttributionConfidence] ?? o.contact_confidence)}</span></span>
             </div>
             ${o.lost_reason ? `<div class="lost-reason">Motivo da perda: ${escapeHtml(o.lost_reason)}</div>` : ""}
             <form method="post" action="/empresa/${opts.company.id}/crm/oportunidades/${o.id}/mover" class="inline-form" style="flex-wrap:wrap">
@@ -1221,8 +1336,10 @@ export function crmPage(opts: {
                 <label>Responsável<select name="responsible_user_id">${memberOptions(o.responsible_user_id)}</select></label>
                 <label>Valor (R$)<input type="number" step="0.01" min="0" name="value" value="${(o.value_cents / 100).toFixed(2)}" /></label>
                 <label>Agendamento<input type="datetime-local" name="scheduled_at" value="${toDatetimeLocal(o.scheduled_at, tz)}" /></label>
+                <label>Compareceu em<input type="datetime-local" name="attended_at" value="${toDatetimeLocal(o.attended_at, tz)}" /></label>
                 <div style="align-self:end"><button type="submit" class="btn btn-small">Salvar</button></div>
               </form>
+              ${originForm}
             </details>
           </div>`;
         })
@@ -1269,9 +1386,16 @@ export function crmStagesPage(opts: { company: Company; user: User; role: Role; 
     .map((s, idx) => {
       const protectedStage = s.is_won || s.is_lost;
       const tag = s.is_won ? '<span class="badge badge-humano">venda concluída</span>' : s.is_lost ? '<span class="badge badge-encerrado">perdido</span>' : "";
+      const flags = s.is_won || s.is_lost
+        ? ""
+        : `<form method="post" action="/empresa/${opts.company.id}/crm/etapas/${s.id}/marcadores" class="inline-form" style="gap:0.8rem;align-items:center">
+            <label class="checkbox-line"><input type="checkbox" name="is_qualified" value="1" ${s.is_qualified ? "checked" : ""} /> conta como lead qualificado</label>
+            <label class="checkbox-line"><input type="checkbox" name="is_attended" value="1" ${s.is_attended ? "checked" : ""} /> conta como comparecimento</label>
+            <button type="submit" class="btn btn-small">Salvar marcadores</button>
+          </form>`;
       return `<li style="flex-direction:column;align-items:stretch;gap:0.5rem">
         <div style="display:flex;justify-content:space-between;align-items:center">
-          <span>${escapeHtml(s.name)} ${tag}</span>
+          <span>${escapeHtml(s.name)} ${tag}${s.is_qualified ? ' <span class="badge">qualificado</span>' : ""}${s.is_attended ? ' <span class="badge">comparecimento</span>' : ""}</span>
           <span style="display:flex;gap:0.3rem">
             <form method="post" action="/empresa/${opts.company.id}/crm/etapas/${s.id}/mover" style="display:inline">
               <input type="hidden" name="direction" value="up" />
@@ -1287,6 +1411,7 @@ export function crmStagesPage(opts: { company: Company; user: User; role: Role; 
           <input type="text" name="name" value="${escapeHtml(s.name)}" />
           <button type="submit" class="btn btn-small">Renomear</button>
         </form>
+        ${flags}
         ${
           protectedStage
             ? '<p class="meta">Etapa de encerramento do funil — não pode ser excluída.</p>'

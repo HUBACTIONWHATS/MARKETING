@@ -34,6 +34,8 @@ export interface Membership {
   company_id: number;
   role: Role;
   created_at: string;
+  /** Capability: atendente com acesso aos relatórios de mídia paga (administrador da empresa sempre tem). */
+  can_view_marketing: number; // 0 | 1
 }
 
 export interface MembershipWithCompany extends Membership {

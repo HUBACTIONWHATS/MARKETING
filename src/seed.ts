@@ -21,6 +21,7 @@ import { addMessage, createConversation, findOrCreateContact } from "./attendanc
 import { hashPassword } from "./auth";
 import { createOpportunity, ensureDefaultPipelineStages } from "./crm";
 import { db, runMigrations } from "./db";
+import { createConnection, linkAccountToCompany, upsertAccount, upsertCampaign, upsertDailyMetric } from "./marketingModels";
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -93,6 +94,63 @@ async function seedDemoOpportunity(
   await createOpportunity({ companyId, contactId: contact.id, title, valueCents, responsibleUserId });
 }
 
+/**
+ * Mídia paga FICTÍCIA só para a Empresa Demo A (plan DEMONSTRACAO): uma
+ * conexão Meta "de demonstração" (token cifrado inútil), uma conta, duas
+ * campanhas com 30 dias de gasto, e leads/vendas atribuídos — para as telas
+ * de Marketing/Inteligência poderem ser vistas com dados. Idempotente: se a
+ * empresa já tem conta de anúncio, não faz nada. Nunca toca empresas reais.
+ */
+async function seedDemoMarketing(companyId: number, createdByUserId: number): Promise<void> {
+  const company = await db.get<{ plan: string; slug: string }>("SELECT plan, slug FROM companies WHERE id = ?", companyId);
+  if (!company || company.plan !== "DEMONSTRACAO" || !company.slug.startsWith("empresa-demo")) return;
+  if (await db.get("SELECT id FROM marketing_accounts WHERE company_id = ?", companyId)) return;
+  if (!process.env.CREDENTIAL_ENCRYPTION_KEY) {
+    console.log("- mídia paga de demonstração: pulada (CREDENTIAL_ENCRYPTION_KEY ausente).");
+    return;
+  }
+  const connectionId = await createConnection({ provider: "META", externalUserId: "demo", displayName: "Conta Meta de demonstração (fictícia)", scopes: "ads_read,read_insights", accessToken: "token-ficticio-de-demonstracao", refreshToken: null, expiresAt: null, createdByUserId });
+  const accountId = await upsertAccount({ connectionId, provider: "META", externalAccountId: "act_demo_a", name: "Empresa Demo A — Meta (fictícia)", currency: "BRL", timezone: "America/Sao_Paulo", accountStatus: "1", isManager: false, loginCustomerId: null });
+  await linkAccountToCompany(accountId, companyId, false);
+  const campaigns = [
+    { externalId: "demo-c1", name: "Corte Premium — Mensagens", spend: 9000, leadsPerDay: 2, wonEvery: 5, value: 12000 },
+    { externalId: "demo-c2", name: "Promoção Barba — Alcance", spend: 6000, leadsPerDay: 3, wonEvery: 15, value: 8000 },
+  ];
+  for (const c of campaigns) {
+    const campaignId = await upsertCampaign({ accountId, companyId, provider: "META", externalId: c.externalId, name: c.name, status: "ACTIVE", objective: "OUTCOME_ENGAGEMENT", campaignType: null, dailyBudgetCents: c.spend, lifetimeBudgetCents: null, currency: "BRL", startDate: null, endDate: null });
+    let n = 0;
+    for (let d = 29; d >= 0; d--) {
+      const day = new Date(Date.now() - d * 86400000);
+      const date = day.toISOString().slice(0, 10);
+      await upsertDailyMetric({ companyId, provider: "META", accountId, campaignId, adGroupId: null, adId: null, level: "CAMPAIGN", dimensionKey: `META:CAMPAIGN:act_demo_a:${c.externalId}::`, metricDate: date, currency: "BRL", spendCents: c.spend, impressions: 4000 + d * 20, reach: 3000, frequency: 1.3, clicks: 120, linkClicks: 90, platformConversations: c.leadsPerDay + 1, platformLeads: null, platformConversions: null, platformConversionValueCents: null, rawMetricsJson: null });
+      for (let i = 0; i < c.leadsPerDay; i++) {
+        n += 1;
+        const phone = `+55 11 9${c.externalId === "demo-c1" ? "7" : "8"}${String(n).padStart(3, "0")}-${String(d).padStart(4, "0")}`;
+        const contact = await findOrCreateContact(companyId, `Lead ${c.name.split(" ")[0]} ${n}`, phone);
+        await db.run("UPDATE contacts SET created_at = ?, source = 'META_ADS', attribution_confidence = 'CONFIRMADA', attribution_provider = 'META', external_campaign_id = ?, ctwa_clid = ? WHERE id = ?", day.toISOString(), c.externalId, `demo-${c.externalId}-${n}`, contact.id);
+        if (n % 2 === 0) {
+          const opp = await createOpportunity({ companyId, contactId: contact.id, title: "Serviço", valueCents: c.value });
+          const won = n % c.wonEvery === 0;
+          const stage = won ? "Venda concluída" : n % 4 === 0 ? "Agendado" : "Qualificado";
+          const stageId = (await db.get<{ id: number }>("SELECT id FROM pipeline_stages WHERE company_id = ? AND name = ?", companyId, stage))!.id;
+          await db.run(
+            "UPDATE opportunities SET stage_id = ?, created_at = ?, updated_at = ?, qualified_at = ?, scheduled_at = ?, attended_at = ?, closed_at = ? WHERE id = ?",
+            stageId,
+            day.toISOString(),
+            day.toISOString(),
+            day.toISOString(),
+            stage === "Agendado" || won ? day.toISOString() : null,
+            won ? day.toISOString() : null,
+            won ? day.toISOString() : null,
+            opp.id
+          );
+        }
+      }
+    }
+  }
+  console.log("- Empresa Demo A: mídia paga FICTÍCIA (Meta) com 30 dias de dados para as telas de Marketing/Inteligência.");
+}
+
 /** Imprime a credencial só quando a conta acabou de ser criada agora — para uma que já existia, a senha não muda e não é mostrada. */
 function logAccount(label: string, email: string, password: string, user: UpsertedUser): void {
   if (user.created) {
@@ -140,6 +198,7 @@ async function main(): Promise<void> {
   await ensureDefaultPipelineStages(empresaBId);
   await seedDemoOpportunity(empresaAId, "Lead Demo A", "+55 11 90000-1002", "Plano mensal", 19900, adminA.id);
   await seedDemoOpportunity(empresaBId, "Lead Demo B", "+55 21 90000-2002", "Plano anual", 149000, adminB.id);
+  await seedDemoMarketing(empresaAId, platformAdmin.id);
 
   console.log(`Seed de demonstração aplicado no ${db.dialect} (dados fictícios, não é atendimento real):`);
   if (db.dialect !== "sqlite") {
