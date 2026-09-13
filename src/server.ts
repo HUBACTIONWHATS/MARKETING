@@ -143,9 +143,22 @@ app.use(
 );
 app.use(csrfMiddleware);
 
-/** URL pública base (para montar links de convite/redefinição), respeitando o proxy em produção. */
-function publicBaseUrl(req: express.Request): string {
-  return process.env.PUBLIC_BASE_URL || `${req.protocol}://${req.get("host")}`;
+// Domínio real da única instância hoje publicada (Render). Usado só como
+// último recurso, quando PUBLIC_BASE_URL não está definida — nunca deduzido
+// de req.protocol/req.get("host") (evita depender de cabeçalhos de proxy
+// que podem vir errados) nem de qualquer outra fonte. Atenção ao digitar:
+// é "hub-action-crm-demo.onrender.com" — ponto antes de "onrender.com",
+// nunca hífen (".onrender.com", não "-onrender.com").
+const FALLBACK_BASE_URL = "https://hub-action-crm-demo.onrender.com";
+
+/**
+ * URL pública base para TODO link absoluto do sistema (convite, redefinição
+ * de senha, instruções de webhook do WhatsApp) — fonte única de verdade,
+ * sempre a variável de ambiente PUBLIC_BASE_URL; sem ela, usa o domínio fixo
+ * acima. Nunca deriva do cabeçalho Host da requisição.
+ */
+function publicBaseUrl(): string {
+  return process.env.PUBLIC_BASE_URL || FALLBACK_BASE_URL;
 }
 
 function clientIp(req: express.Request): string {
@@ -255,6 +268,19 @@ app.get("/login", (req, res) => {
   res.send(loginPage());
 });
 
+/**
+ * Motivo específico de uma falha de login — só para o console do servidor
+ * (Render → Logs), nunca para a resposta HTTP nem para o log de auditoria
+ * visível na tela (que continua genérico, de propósito, para não revelar se
+ * o e-mail existe). NUNCA inclui a senha digitada nem o hash guardado —
+ * só o fato de terem batido ou não.
+ */
+type LoginFailureReason = "usuario_nao_encontrado" | "senha_incorreta" | "usuario_inativo" | "senha_ausente";
+
+function logLoginAttempt(reason: LoginFailureReason | "ok", emailAttempted: string | undefined, userId: number | null, ip: string): void {
+  console.log(`[login] ${reason} — e-mail tentado: ${emailAttempted ?? "(vazio)"}${userId ? `, user_id: ${userId}` : ""}, ip: ${ip}`);
+}
+
 app.post("/login", async (req, res) => {
   const { email, password } = req.body as { email?: string; password?: string };
   const ip = clientIp(req);
@@ -267,8 +293,18 @@ app.post("/login", async (req, res) => {
   }
 
   const user = email ? (await findUserByEmail(email.trim().toLowerCase())) ?? (await findUserByEmail(email.trim())) : undefined;
-  if (!user || !password || !verifyPassword(password, user.password_hash) || !user.active) {
+
+  // Motivo específico só para diagnóstico (console) — a mensagem ao usuário e
+  // o audit_log continuam genéricos, de propósito (não revelar se o e-mail existe).
+  let failureReason: LoginFailureReason | undefined;
+  if (!user) failureReason = "usuario_nao_encontrado";
+  else if (!password) failureReason = "senha_ausente";
+  else if (!verifyPassword(password, user.password_hash)) failureReason = "senha_incorreta";
+  else if (!user.active) failureReason = "usuario_inativo";
+
+  if (failureReason) {
     if (email) recordLoginFailure(ip, email);
+    logLoginAttempt(failureReason, email, user?.id ?? null, ip);
     await audit("login_falhou", { userId: user?.id ?? null, detail: email ? `e-mail: ${email.trim().slice(0, 120)}` : undefined, ip });
     res.status(401).send(loginPage("E-mail ou senha inválidos."));
     return;
@@ -277,11 +313,13 @@ app.post("/login", async (req, res) => {
   if (email) clearLoginThrottle(ip, email);
   req.session.regenerate((err) => {
     if (err) {
+      console.error(`[login] erro_de_sessao — user_id: ${user!.id}, ip: ${ip}, erro: ${err instanceof Error ? err.message : err}`);
       res.status(500).send(loginPage("Erro ao iniciar sessão. Tente novamente."));
       return;
     }
-    req.session.userId = user.id;
-    audit("login_ok", { userId: user.id, ip }).catch((e) => console.error("[audit]", e));
+    req.session.userId = user!.id;
+    logLoginAttempt("ok", email, user!.id, ip);
+    audit("login_ok", { userId: user!.id, ip }).catch((e) => console.error("[audit]", e));
     res.redirect("/");
   });
 });
@@ -354,6 +392,7 @@ app.get("/", requireAuth, async (_req, res) => {
   }
   const memberships = await listMembershipsForUser(user.id);
   if (memberships.length === 0) {
+    console.log(`[login] vinculo_inexistente — usuário autenticado sem nenhuma empresa associada, user_id: ${user.id}`);
     res.send(noCompanyPage());
     return;
   }
@@ -392,7 +431,7 @@ app.get("/admin/log", requirePlatformAdmin, async (_req, res) => {
 // Só requirePlatformAdmin (nunca administrador de empresa nem atendente).
 // Cada rota audita quem fez o quê, sem nunca gravar o segredo — ver access.ts.
 
-async function renderWhatsappAdmin(res: express.Response, extra: { notice?: string; error?: string } = {}, publicBaseUrlValue?: string): Promise<void> {
+async function renderWhatsappAdmin(res: express.Response, extra: { notice?: string; error?: string } = {}): Promise<void> {
   const companies = await listCompaniesForAdmin();
   const connections = new Map(
     (
@@ -409,7 +448,7 @@ async function renderWhatsappAdmin(res: express.Response, extra: { notice?: stri
       companies,
       connections,
       graphApiVersion: getWhatsappCredentials().graphApiVersion,
-      webhookUrl: `${publicBaseUrlValue ?? process.env.PUBLIC_BASE_URL ?? ""}/webhooks/whatsapp`,
+      webhookUrl: `${publicBaseUrl()}/webhooks/whatsapp`,
       verifyTokenConfigured: !!getWhatsappCredentials().verifyToken,
       appSecretConfigured: !!getWhatsappCredentials().appSecret,
       ...extra,
@@ -417,7 +456,7 @@ async function renderWhatsappAdmin(res: express.Response, extra: { notice?: stri
   );
 }
 
-app.get("/admin/whatsapp", requirePlatformAdmin, async (req, res) => renderWhatsappAdmin(res, {}, publicBaseUrl(req)));
+app.get("/admin/whatsapp", requirePlatformAdmin, async (_req, res) => renderWhatsappAdmin(res, {}));
 
 app.post("/admin/whatsapp/:companyId/cadastrar", requirePlatformAdmin, async (req, res) => {
   const companyId = Number(req.params.companyId);
@@ -429,7 +468,7 @@ app.post("/admin/whatsapp/:companyId/cadastrar", requirePlatformAdmin, async (re
     environment?: string;
   };
   if (!company) {
-    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." }, publicBaseUrl(req));
+    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." });
     return;
   }
   const env: WhatsappEnvironment = environment === "PRODUCAO" ? "PRODUCAO" : "TESTE";
@@ -447,8 +486,7 @@ app.post("/admin/whatsapp/:companyId/cadastrar", requirePlatformAdmin, async (re
   });
   await renderWhatsappAdmin(
     res,
-    result.ok ? { notice: `Conexão cadastrada para "${company.name}". Use "Testar conexão" antes de ativar.` } : { error: result.error },
-    publicBaseUrl(req)
+    result.ok ? { notice: `Conexão cadastrada para "${company.name}". Use "Testar conexão" antes de ativar.` } : { error: result.error }
   );
 });
 
@@ -457,7 +495,7 @@ app.post("/admin/whatsapp/:companyId/substituir-token", requirePlatformAdmin, as
   const company = await findCompanyById(companyId);
   const { access_token } = req.body as { access_token?: string };
   if (!company) {
-    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." }, publicBaseUrl(req));
+    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." });
     return;
   }
   const result = await replaceConnectionToken(companyId, access_token ?? "");
@@ -471,8 +509,7 @@ app.post("/admin/whatsapp/:companyId/substituir-token", requirePlatformAdmin, as
     res,
     result.ok
       ? { notice: `Credencial de "${company.name}" substituída. A conexão foi desativada até um novo teste confirmar o token.` }
-      : { error: result.error },
-    publicBaseUrl(req)
+      : { error: result.error }
   );
 });
 
@@ -480,12 +517,12 @@ app.post("/admin/whatsapp/:companyId/testar", requirePlatformAdmin, async (req, 
   const companyId = Number(req.params.companyId);
   const company = await findCompanyById(companyId);
   if (!company) {
-    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." }, publicBaseUrl(req));
+    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." });
     return;
   }
   const throttle = checkActionThrottle("whatsapp_testar", clientIp(req), companyId, 20);
   if (!throttle.allowed) {
-    await renderWhatsappAdmin(res, { error: `Muitos testes seguidos. Tente de novo em ${throttle.retryAfterMinutes} minuto(s).` }, publicBaseUrl(req));
+    await renderWhatsappAdmin(res, { error: `Muitos testes seguidos. Tente de novo em ${throttle.retryAfterMinutes} minuto(s).` });
     return;
   }
   recordAction("whatsapp_testar", clientIp(req), companyId);
@@ -498,8 +535,7 @@ app.post("/admin/whatsapp/:companyId/testar", requirePlatformAdmin, async (req, 
   });
   await renderWhatsappAdmin(
     res,
-    result.ok ? { notice: `Teste de "${company.name}": ${result.detail}` } : { error: `Teste de "${company.name}" falhou: ${result.detail}` },
-    publicBaseUrl(req)
+    result.ok ? { notice: `Teste de "${company.name}": ${result.detail}` } : { error: `Teste de "${company.name}" falhou: ${result.detail}` }
   );
 });
 
@@ -507,24 +543,24 @@ app.post("/admin/whatsapp/:companyId/ativar", requirePlatformAdmin, async (req, 
   const companyId = Number(req.params.companyId);
   const company = await findCompanyById(companyId);
   if (!company) {
-    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." }, publicBaseUrl(req));
+    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." });
     return;
   }
   const result = await activateConnection(companyId);
   await audit("whatsapp_conexao_ativada", { companyId, userId: res.locals.user.id, detail: result.ok ? "ativada" : `falhou: ${result.error}`, ip: clientIp(req) });
-  await renderWhatsappAdmin(res, result.ok ? { notice: `Conexão de "${company.name}" ativada.` } : { error: result.error }, publicBaseUrl(req));
+  await renderWhatsappAdmin(res, result.ok ? { notice: `Conexão de "${company.name}" ativada.` } : { error: result.error });
 });
 
 app.post("/admin/whatsapp/:companyId/desativar", requirePlatformAdmin, async (req, res) => {
   const companyId = Number(req.params.companyId);
   const company = await findCompanyById(companyId);
   if (!company) {
-    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." }, publicBaseUrl(req));
+    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." });
     return;
   }
   const result = await deactivateConnection(companyId);
   await audit("whatsapp_conexao_desativada", { companyId, userId: res.locals.user.id, detail: result.ok ? "desativada" : `falhou: ${result.error}`, ip: clientIp(req) });
-  await renderWhatsappAdmin(res, result.ok ? { notice: `Conexão de "${company.name}" desativada.` } : { error: result.error }, publicBaseUrl(req));
+  await renderWhatsappAdmin(res, result.ok ? { notice: `Conexão de "${company.name}" desativada.` } : { error: result.error });
 });
 
 app.post("/admin/whatsapp/:companyId/assinar-webhook", requirePlatformAdmin, async (req, res) => {
@@ -532,16 +568,16 @@ app.post("/admin/whatsapp/:companyId/assinar-webhook", requirePlatformAdmin, asy
   const company = await findCompanyById(companyId);
   const { confirmar } = req.body as { confirmar?: string };
   if (!company) {
-    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." }, publicBaseUrl(req));
+    await renderWhatsappAdmin(res, { error: "Empresa não encontrada." });
     return;
   }
   if (confirmar !== "1") {
-    await renderWhatsappAdmin(res, { error: "Confirme a caixa de seleção para assinar o aplicativo no WABA." }, publicBaseUrl(req));
+    await renderWhatsappAdmin(res, { error: "Confirme a caixa de seleção para assinar o aplicativo no WABA." });
     return;
   }
   const throttle = checkActionThrottle("whatsapp_assinar", clientIp(req), companyId, 10);
   if (!throttle.allowed) {
-    await renderWhatsappAdmin(res, { error: `Muitas tentativas seguidas. Tente de novo em ${throttle.retryAfterMinutes} minuto(s).` }, publicBaseUrl(req));
+    await renderWhatsappAdmin(res, { error: `Muitas tentativas seguidas. Tente de novo em ${throttle.retryAfterMinutes} minuto(s).` });
     return;
   }
   recordAction("whatsapp_assinar", clientIp(req), companyId);
@@ -554,8 +590,7 @@ app.post("/admin/whatsapp/:companyId/assinar-webhook", requirePlatformAdmin, asy
   });
   await renderWhatsappAdmin(
     res,
-    result.ok ? { notice: `"${company.name}": ${result.detail}` } : { error: `"${company.name}": ${result.detail}` },
-    publicBaseUrl(req)
+    result.ok ? { notice: `"${company.name}": ${result.detail}` } : { error: `"${company.name}": ${result.detail}` }
   );
 });
 
@@ -602,7 +637,7 @@ app.post("/admin/empresas/:companyId/convites", requirePlatformAdmin, async (req
   const token = await createInvite(companyId, email, inviteRole, res.locals.user.id);
   await audit("convite_criado", { companyId, userId: res.locals.user.id, detail: `${email} (${inviteRole})`, ip: clientIp(req) });
   await renderAdmin(res, {
-    generatedLink: { label: `Convite para ${email} — ${company.name}`, url: `${publicBaseUrl(req)}/convite/${token}` },
+    generatedLink: { label: `Convite para ${email} — ${company.name}`, url: `${publicBaseUrl()}/convite/${token}` },
   });
 });
 
@@ -615,7 +650,7 @@ app.post("/admin/usuarios/:userId/redefinir", requirePlatformAdmin, async (req, 
   const token = await createPasswordReset(user.id, user.email, res.locals.user.id);
   await audit("redefinicao_gerada", { userId: user.id, detail: `por Hub Action (${res.locals.user.email})`, ip: clientIp(req) });
   await renderAdmin(res, {
-    generatedLink: { label: `Nova senha para ${user.name} (${user.email}) — vale 2 horas`, url: `${publicBaseUrl(req)}/redefinir/${token}` },
+    generatedLink: { label: `Nova senha para ${user.name} (${user.email}) — vale 2 horas`, url: `${publicBaseUrl()}/redefinir/${token}` },
   });
 });
 
@@ -893,7 +928,7 @@ app.post("/empresa/:companyId/configuracoes/equipe/convites", requireCompanyAdmi
   const inviteRole: Role = role === "COMPANY_ADMIN" ? "COMPANY_ADMIN" : "AGENT";
   const token = await createInvite(company.id, email, inviteRole, res.locals.user.id);
   await audit("convite_criado", { companyId: company.id, userId: res.locals.user.id, detail: `${email} (${inviteRole})`, ip: clientIp(req) });
-  await renderSettings(res, { generatedLink: { label: `Convite para ${email}`, url: `${publicBaseUrl(req)}/convite/${token}` } });
+  await renderSettings(res, { generatedLink: { label: `Convite para ${email}`, url: `${publicBaseUrl()}/convite/${token}` } });
 });
 
 app.post("/empresa/:companyId/configuracoes/equipe/:userId/redefinir", requireCompanyAdmin, async (req, res) => {
@@ -905,7 +940,7 @@ app.post("/empresa/:companyId/configuracoes/equipe/:userId/redefinir", requireCo
   }
   const token = await createPasswordReset(target.user_id, target.email, res.locals.user.id);
   await audit("redefinicao_gerada", { companyId: company.id, userId: target.user_id, detail: `por ${res.locals.user.email}`, ip: clientIp(req) });
-  await renderSettings(res, { generatedLink: { label: `Nova senha para ${target.name} — vale 2 horas`, url: `${publicBaseUrl(req)}/redefinir/${token}` } });
+  await renderSettings(res, { generatedLink: { label: `Nova senha para ${target.name} — vale 2 horas`, url: `${publicBaseUrl()}/redefinir/${token}` } });
 });
 
 app.post("/empresa/:companyId/configuracoes/equipe/:userId/ativo", requireCompanyAdmin, async (req, res) => {

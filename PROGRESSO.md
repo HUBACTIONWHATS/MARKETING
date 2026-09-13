@@ -569,3 +569,35 @@ O papel "Administrador geral da Hub Action" já existia desde a Etapa 2: coluna 
 
 - O e-mail do novo administrador geral e o procedimento de primeiro acesso foram informados só ao usuário, fora deste arquivo (não são segredo, mas não pertencem à documentação do projeto).
 - Mesmas pendências de WhatsApp/robô de sempre — nada disso foi tocado nesta etapa.
+
+## Etapa concluída: Etapa 14 — Domínio correto nos links absolutos + diagnóstico de login
+
+Pedido pelo usuário: links de convite estavam sendo gerados com `https://hub-action-crm-demo-onrender.com` (hífen, `DNS_PROBE_FINISHED_NXDOMAIN`) em vez de `.onrender.com` (ponto); e um usuário real (`brunopregador1@gmail.com`, atendente da empresa "BRN BARBEARIA") não conseguia entrar mesmo após redefinir a senha.
+
+### Domínio dos links (causa raiz e correção)
+
+Não era um bug de lógica — todo link absoluto (convite, redefinição, instruções de webhook) já passava só pela função `publicBaseUrl()` ([src/server.ts](src/server.ts)), sem nenhuma segunda implementação. O problema: sem `PUBLIC_BASE_URL` definida, o código antes caía para `req.protocol`/`req.get("host")` (dependente de cabeçalho, sujeito a comportamento de proxy) — e o valor com hífen provavelmente veio de um `PUBLIC_BASE_URL` digitado errado no painel do Render em algum momento anterior.
+
+- **`publicBaseUrl()` simplificada**: agora usa exclusivamente `process.env.PUBLIC_BASE_URL`, e se ausente, um domínio fixo de reserva (`FALLBACK_BASE_URL = "https://hub-action-crm-demo.onrender.com"`, com comentário de alerta contra o erro de digitação) — nunca mais deriva de cabeçalho de requisição. Removida a duplicação de lógica equivalente que existia só na tela de Conexões do WhatsApp (`renderWhatsappAdmin` agora chama `publicBaseUrl()` direto, sem parâmetro repetido).
+- Testado localmente (SQLite descartável): convite gerado sem `PUBLIC_BASE_URL` → `https://hub-action-crm-demo.onrender.com/convite/{token}` (formato exato pedido); com `PUBLIC_BASE_URL` definida → essa variável prevalece, como já era o comportamento correto.
+- `.env.example` e `PUBLICACAO.md` atualizados com o domínio certo e aviso explícito sobre o hífen.
+- **Depende de você**: se `PUBLIC_BASE_URL` estiver definida no painel do Render com o valor errado, ela continua prevalecendo sobre a correção — confira/corrija lá (a correção no código só cobre o caso de estar ausente).
+
+### Diagnóstico do login de `brunopregador1@gmail.com`
+
+Investigação (só leitura, direto no banco de produção) mostrou a sequência real de eventos: convite aceito → conta criada (atendente da empresa "BRN BARBEARIA", `is_platform_admin=0`) → link de redefinição gerado e usado → senha trocada com sucesso → **login bem-sucedido** (`login_ok` registrado) → duas tentativas de login falhas alguns segundos depois. Ou seja: o fluxo (geração do link, validação do token, gravação da senha com hash bcrypt, busca por e-mail, comparação de hash, criação de sessão, redirecionamento por perfil) funcionou de ponta a ponta pelo menos uma vez — nada de errado foi encontrado na lógica. As duas falhas seguintes são consistentes com senha digitada errada numa tentativa posterior (não um bug reproduzível). Redirecionamento por perfil conferido no código: administrador geral vai para `/admin`; qualquer outro perfil vai direto para o painel da própria empresa (nunca `/admin`) — já era assim, sem alteração necessária.
+
+Mesmo sem um bug confirmado, adicionado por pedido explícito: **log de diagnóstico seguro** no `/login` (`src/server.ts`) distinguindo usuário não encontrado, senha ausente, senha incorreta, usuário inativo, vínculo (empresa) inexistente e erro de sessão — só no console do servidor (Render → Logs), nunca na resposta ao navegador nem no log de auditoria visível na tela (que continuam genéricos, de propósito, para não revelar se um e-mail existe). Nunca registra a senha nem o hash.
+
+Nenhum usuário foi criado, duplicado ou alterado; nenhuma empresa ou conversa foi tocada.
+
+### Verificado
+
+- `npx tsc --noEmit` limpo, `npm run build` gera `dist/server.js`.
+- 85/85 testes em SQLite e em Postgres real local (`npm run test:pg`) — nenhuma regressão.
+- Diff auditado antes do commit: nenhum segredo.
+
+### Pendências reais
+
+- Confirmar/corrigir o valor de `PUBLIC_BASE_URL` no painel do Render, se estiver definido com o hífen.
+- Se `brunopregador1@gmail.com` continuar sem conseguir entrar, os logs novos (Render → Logs) já mostram o motivo exato na próxima tentativa.

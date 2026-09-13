@@ -91,7 +91,7 @@ Variáveis de ambiente (nunca no código, nunca no Git):
 | `NODE_ENV=production` | Sim | Liga a segurança de produção: exige `SESSION_SECRET`, cookie seguro, `trust proxy`. **Não** desliga mais o banner/simulador — isso agora é o `DEMO_MODE` (ver abaixo) |
 | `DEMO_MODE` | Não (padrão: ligado) | Mostra o banner amarelo e o simulador de conversa. Deixe ligado no piloto (não defina, ou `DEMO_MODE=true`); só desligue (`DEMO_MODE=false`) quando o WhatsApp real estiver conectado — nesse caso o seed também passa a recusar rodar |
 | `SESSION_SECRET` | Sim (≥ 32 caracteres) | Gere com `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"` |
-| `PUBLIC_BASE_URL` | Sim | Ex.: `https://hubaction.onrender.com` — usado nos links de convite/redefinição |
+| `PUBLIC_BASE_URL` | Recomendado | `https://hub-action-crm-demo.onrender.com` (ponto antes de "onrender.com", **nunca** hífen) — usado em todo link absoluto (convite, redefinição, webhook). Sem ela, o código usa esse mesmo domínio como reserva fixa — mas se for definida com um valor errado, esse valor errado prevalece |
 | `PORT` | Normalmente a hospedagem define | Porta HTTP |
 | `DATABASE_URL` | Sim (piloto) | Connection string da Neon (`postgresql://...`). Sem ela, a aplicação usa SQLite local |
 | `DATABASE_SSL` | Não | `require` (padrão fora de localhost); `no-verify` só se o certificado falhar; `disable` só para Postgres local |
