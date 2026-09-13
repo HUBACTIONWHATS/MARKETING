@@ -544,3 +544,28 @@ Reaproveitada em vez de duplicada: a tabela `whatsapp_connections` (já existia,
 
 - Envio de mensagens de template continua não implementado (mesma pendência de antes).
 - Diagnóstico do número de teste e integração com o robô/atendimento externo continuam pendentes, como já declarado nas telas.
+
+## Etapa concluída: Etapa 13 — Administrador geral separado + matriz de autorização testada
+
+Pedido pelo usuário (que estava logado como `admin@empresa-a.dev` e recebeu corretamente 403 em `/admin/whatsapp`): confirmar o modelo de administrador geral já existente e criar um usuário separado para essa função, sem alterar `admin@empresa-a.dev`, a Empresa A, a Empresa B ou seus usuários.
+
+### Análise (antes de mudar código)
+
+O papel "Administrador geral da Hub Action" já existia desde a Etapa 2: coluna `is_platform_admin` em `users`, aplicado por `requirePlatformAdmin` ([src/auth.ts](src/auth.ts)) em `/admin` e, desde a Etapa 12, também em `/admin/whatsapp/*`. Nenhuma tabela, papel ou middleware novo foi criado — reaproveitado como pedido.
+
+### O que foi feito
+
+- **Área renomeada**: "Painel da Hub Action" → **"Administração Hub Action"** (título da página e cabeçalho, [src/views.ts](src/views.ts)/[src/server.ts](src/server.ts)) — mesma página, mesmas rotas, mesmas funcionalidades já existentes: administrar empresas, administrar usuários, ver situação dos planos, acessar Conexões do WhatsApp.
+- **Novo administrador geral, separado do original**: criado direto no banco (script de uso único, apagado depois de rodar — não fica no repositório), com senha aleatória gerada e descartada na hora (só o hash bcrypt é gravado) e um link de definição de senha de uso único (2 horas), gerado pelo mesmo mecanismo `createPasswordReset` já usado pelo resto do sistema. `admin@hubaction.dev` (o administrador original) e `admin@empresa-a.dev`/Empresa A/Empresa B foram conferidos linha a linha no banco depois — intactos.
+- **[src/auth.test.ts](src/auth.test.ts) (novo)**: matriz de autorização direto contra `requirePlatformAdmin` (a mesma função das rotas reais) — visitante (redireciona para `/login`), atendente (403), administrador de empresa com uma ou várias empresas (403), administrador geral (passa), usuário desativado/inexistente (tratados como sessão inválida).
+
+### Verificado
+
+- `npx tsc --noEmit` limpo, `npm run build` gera `dist/server.js`.
+- **85/85 testes em SQLite e em Postgres real local** (`npm run test:pg`).
+- Auditoria do diff e do commit antes do push: nenhuma senha, token, connection string ou chave encontrada (só o e-mail do novo administrador, que não é segredo).
+
+### Pendências reais
+
+- O e-mail do novo administrador geral e o procedimento de primeiro acesso foram informados só ao usuário, fora deste arquivo (não são segredo, mas não pertencem à documentação do projeto).
+- Mesmas pendências de WhatsApp/robô de sempre — nada disso foi tocado nesta etapa.
