@@ -518,11 +518,11 @@ export function adminPage(opts: {
     .join("");
 
   return page(
-    "Painel da Hub Action",
+    "Administração Hub Action",
     `${IS_DEMO ? '<div class="demo-banner" style="margin:0;border-radius:0">⚠️ Ambiente de teste — dados fictícios (modo de demonstração), sem conexão com WhatsApp real.</div>' : ""}
     <div style="max-width:1000px;margin:0 auto;padding:1.5rem">
       <div class="toolbar">
-        <h2 style="margin:0">Painel da Hub Action</h2>
+        <h2 style="margin:0">Administração Hub Action</h2>
         <div style="display:flex;gap:0.5rem">
           <a href="/admin/whatsapp" class="btn btn-small">Conexões do WhatsApp</a>
           <a href="/admin/log" class="btn btn-small">Log de auditoria</a>

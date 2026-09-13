@@ -369,7 +369,7 @@ app.get("/empresas", requireAuth, async (_req, res) => {
   res.send(companySelectorPage(memberships));
 });
 
-// --- Painel da Hub Action: empresas, usuários, planos manuais, conexões -----
+// --- Administração Hub Action: empresas, usuários, planos manuais, conexões -
 
 async function renderAdmin(
   res: express.Response,
