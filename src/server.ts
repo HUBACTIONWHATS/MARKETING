@@ -12,7 +12,8 @@ import {
   listAuditEntries,
   listPendingInvites,
 } from "./access";
-import { requireAuth, requireCompanyAccess, requirePlatformAdmin, verifyPassword } from "./auth";
+import { effectiveRole, marketingAccessAllowed, requireAuth, requireCompanyAccess, requireMarketingAccess, requirePlatformAdmin, verifyPassword } from "./auth";
+import { providerNavStatuses, runWithShell, type ShellContext } from "./shellContext";
 import { checkActionThrottle, recordAction } from "./actionThrottle";
 import { evaluateAlerts, listAlerts, listAlertsAllCompanies, listGlobalRules, RULE_KINDS, saveThreshold, updateAlertStatus, type AlertStatus } from "./alerts";
 import { applyContactAttribution, declareContactSource, LEAD_SOURCES, parseWhatsAppReferral, type LeadSource } from "./attribution";
@@ -21,6 +22,7 @@ import { recordConversionEvent } from "./conversionFeedback";
 import { csrfMiddleware } from "./csrf";
 import { decryptSecret, isCredentialEncryptionConfigured } from "./credentialCrypto";
 import {
+  channelCostQuality,
   buildAttention,
   costVsQuality,
   detectBottlenecks,
@@ -74,6 +76,7 @@ import {
   type CompanySummary,
 } from "./viewsAdminMarketing";
 import {
+  type DataProvenance,
   alertsPage,
   attentionBlock,
   campaignsTable,
@@ -127,7 +130,7 @@ import {
 } from "./crm";
 import { computeDashboard } from "./dashboard";
 import { db, runMigrations } from "./db";
-import {
+import { type Company, findMembership,
   createCompany,
   findCompanyById,
   findUserByEmail,
@@ -748,6 +751,42 @@ app.post("/admin/usuarios/:userId/ativo", requirePlatformAdmin, async (req, res)
 
 // --- Conversas (caixa de entrada + simulador exclusivo de desenvolvimento) --
 
+// --- Contexto do menu (shell) por requisição ---------------------------------
+// Calcula, para qualquer página de empresa, se o grupo Marketing aparece e o
+// estado de cada provedor (Meta/Google), a partir das contas VINCULADAS À
+// EMPRESA (marketing_accounts.company_id) — nunca da sessão OAuth global.
+// Não concede acesso: quem barra continua sendo requireCompanyAccess /
+// requireMarketingAccess em cada rota.
+app.use("/empresa/:companyId", async (req, res, next) => {
+  try {
+    const userId = req.session.userId;
+    const companyId = Number(req.params.companyId);
+    if (!userId || !Number.isInteger(companyId)) {
+      next();
+      return;
+    }
+    const user = await findUserById(userId);
+    if (!user || !user.active) {
+      next();
+      return;
+    }
+    const membership = (await findMembership(user.id, companyId)) ?? null;
+    if (Number(user.is_platform_admin) !== 1 && !membership) {
+      next();
+      return;
+    }
+    const accounts = await listAccountsForCompany(companyId);
+    const ctx: ShellContext = {
+      canViewMarketing: marketingAccessAllowed(user, membership),
+      isPlatformAdmin: Number(user.is_platform_admin) === 1,
+      providers: providerNavStatuses(accounts),
+    };
+    runWithShell(ctx, () => next());
+  } catch (err) {
+    next(err);
+  }
+});
+
 app.get("/empresa/:companyId/conversas", requireCompanyAccess, async (_req, res) => {
   const items = await listConversations(res.locals.company.id);
   res.send(
@@ -1312,24 +1351,27 @@ const NAV_PAGES: Record<string, { title: string; description: string }> = {
   },
 };
 
-app.get("/empresa/:companyId/:page", requireCompanyAccess, (req, res, next) => {
+app.get("/empresa/:companyId/:page", async (req, res, next) => {
   const page = String(req.params.page);
   const def = NAV_PAGES[page];
   if (!def) {
-    // Não é uma página vazia: deixa as rotas registradas depois (marketing, inteligencia, alertas) tentarem; sem nenhuma, o Express responde 404.
+    // Não é uma página vazia: deixa as rotas registradas depois (marketing, inteligencia, alertas) tentarem — ANTES de
+    // qualquer checagem de vínculo, senão o administrador geral (sem vínculo) tomaria 403 aqui e nunca chegaria ao marketing.
     next();
     return;
   }
-  res.send(
-    appShell({
-      company: res.locals.company,
-      user: res.locals.user,
-      role: res.locals.membership.role,
-      active: page,
-      canViewMarketing: canViewMarketing(res),
-      body: emptyState(def.title, def.description),
-    })
-  );
+  await requireCompanyAccess(req, res, () => {
+    res.send(
+      appShell({
+        company: res.locals.company,
+        user: res.locals.user,
+        role: res.locals.membership.role,
+        active: page,
+        canViewMarketing: canViewMarketing(res),
+        body: emptyState(def.title, def.description),
+      })
+    );
+  });
 });
 
 // ============================================================================
@@ -1338,21 +1380,21 @@ app.get("/empresa/:companyId/:page", requireCompanyAccess, (req, res, next) => {
 // requireCompanyAccess (membership) + capability de mídia paga.
 // ============================================================================
 
-/** Administrador da empresa sempre; atendente só com memberships.can_view_marketing = 1. */
-async function requireMarketingAccess(req: express.Request, res: express.Response, next: express.NextFunction): Promise<void> {
-  await requireCompanyAccess(req, res, () => {
-    const m = res.locals.membership;
-    if (m.role !== "COMPANY_ADMIN" && Number(m.can_view_marketing) !== 1) {
-      res.status(403).send(appShell({ company: res.locals.company, user: res.locals.user, role: m.role, active: "", canViewMarketing: false, body: emptyState("Sem acesso aos relatórios de mídia paga", "Peça ao administrador da empresa para liberar o acesso.") }));
-      return;
-    }
-    next();
-  });
+/** Quem vê mídia paga: regra única em auth.ts (administrador geral sempre; empresa; atendente com capability). */
+function canViewMarketing(res: express.Response): boolean {
+  return marketingAccessAllowed(res.locals.user, res.locals.membership ?? null);
 }
 
-function canViewMarketing(res: express.Response): boolean {
-  const m = res.locals.membership;
-  return m.role === "COMPANY_ADMIN" || Number(m.can_view_marketing) === 1;
+/**
+ * Procedência dos dados mostrados no Command Center — para nunca misturar em
+ * silêncio investimento real com CRM de demonstração (CAC/ROAS enganosos):
+ * - mídia: "real" quando há conta vinculada e a empresa não é a demo semeada;
+ *   "demo" para as empresas empresa-demo-* semeadas; "none" sem conta;
+ * - CRM: "demo" enquanto DEMO_MODE estiver ligado (simulador ativo).
+ */
+function dataProvenance(company: Company, accounts: { id: number }[]): DataProvenance {
+  const demoSeed = company.slug.startsWith("empresa-demo") && company.plan === "DEMONSTRACAO";
+  return { media: accounts.length === 0 ? "none" : demoSeed ? "demo" : "real", crm: DEMO_MODE ? "demo" : "real" };
 }
 
 async function marketingContext(req: express.Request, res: express.Response, forced: Partial<BiFilters> = {}, presetOverride?: string): Promise<MarketingPageBase & { period: ResolvedPeriod }> {
@@ -1366,11 +1408,19 @@ async function marketingContext(req: express.Request, res: express.Response, for
   const sort = q.ordenar && /^[a-z_]+$/.test(q.ordenar) ? q.ordenar : null;
   const members = await listCompanyMembers(company.id);
   const stages = await listStages(company.id);
+  const accounts = await listAccountsForCompany(company.id);
+  const masterMetric = q.m && /^[a-z]+$/.test(q.m) ? q.m : "investimento";
+  const channelMetric = q.canalMetrica && /^[a-z]+$/.test(q.canalMetrica) ? q.canalMetrica : "leads";
   return {
     company,
     user: res.locals.user,
-    role: res.locals.membership.role,
+    role: effectiveRole(res),
+    isPlatformAdmin: Number(res.locals.user.is_platform_admin) === 1,
     canViewMarketing: canViewMarketing(res),
+    accounts,
+    provenance: dataProvenance(company, accounts),
+    masterMetric,
+    channelMetric,
     bi,
     filterOptions: { campaigns: await listCampaignsForCompany(company.id), members, stages },
     m1,
@@ -1383,7 +1433,8 @@ async function marketingContext(req: express.Request, res: express.Response, for
 }
 
 app.get("/empresa/:companyId/marketing", requireMarketingAccess, async (req, res) => {
-  res.send(marketingOverviewPage(await marketingContext(req, res)));
+  const base = await marketingContext(req, res);
+  res.send(marketingOverviewPage(base, channelCostQuality(base.bi.providers)));
 });
 
 app.get("/empresa/:companyId/marketing/campanhas", requireMarketingAccess, async (req, res) => {
@@ -1405,12 +1456,12 @@ app.get("/empresa/:companyId/marketing/campanhas/:campaignId", requireMarketingA
 
 app.get("/empresa/:companyId/marketing/meta", requireMarketingAccess, async (req, res) => {
   const base = await marketingContext(req, res, { channel: "META_ADS" });
-  res.send(marketingProviderPage(base, "META", (await listAccountsForCompany(res.locals.company.id)).filter((a) => a.provider === "META")));
+  res.send(marketingProviderPage(base, "META", base.accounts.filter((a) => a.provider === "META")));
 });
 
 app.get("/empresa/:companyId/marketing/google", requireMarketingAccess, async (req, res) => {
   const base = await marketingContext(req, res, { channel: "GOOGLE_ADS" });
-  res.send(marketingProviderPage(base, "GOOGLE", (await listAccountsForCompany(res.locals.company.id)).filter((a) => a.provider === "GOOGLE")));
+  res.send(marketingProviderPage(base, "GOOGLE", base.accounts.filter((a) => a.provider === "GOOGLE")));
 });
 
 app.get("/empresa/:companyId/marketing/funil", requireMarketingAccess, async (req, res) => {
@@ -1456,7 +1507,7 @@ async function renderIntelligence(req: express.Request, res: express.Response, e
     intelligencePage({
       company,
       user: res.locals.user,
-      role: res.locals.membership.role,
+      role: effectiveRole(res),
       canViewMarketing: canViewMarketing(res),
       bi,
       bi7,
@@ -1512,7 +1563,7 @@ app.get("/empresa/:companyId/alertas", requireMarketingAccess, async (req, res) 
     alertsPage({
       company,
       user: res.locals.user,
-      role: res.locals.membership.role,
+      role: effectiveRole(res),
       canViewMarketing: canViewMarketing(res),
       alerts: await listAlerts(company.id, status),
       status,

@@ -11,7 +11,7 @@
 import { CONFIDENCE_LABELS, SOURCE_LABELS, type AttributionConfidence, type LeadSource } from "./attribution";
 import { db } from "./db";
 import { deltaPercent, monthBoundsIso, ratio, type CampaignRow, type CompanyBi, type PeriodSnapshot } from "./bi";
-import { listAccountsForCompany, type MarketingProvider } from "./marketingModels";
+import { PROVIDER_LABELS, listAccountsForCompany, type MarketingProvider } from "./marketingModels";
 
 // --- Formatação (pt-BR, usada nos textos dos insights) ------------------------
 
@@ -193,9 +193,14 @@ export function detectBottlenecks(s: PeriodSnapshot): Bottleneck[] {
 
 export type Severity = "CRITICO" | "ATENCAO" | "OPORTUNIDADE" | "INFORMACAO";
 
+/** Onde o fato acontece: por provedor, mídia paga em geral, CRM/atendimento ou integração. */
+export type AttentionChannel = "META" | "GOOGLE" | "MIDIA" | "CRM" | "INTEGRACAO";
+export const ATTENTION_CHANNEL_LABELS: Record<AttentionChannel, string> = { META: "Meta Ads", GOOGLE: "Google Ads", MIDIA: "Mídia paga (geral)", CRM: "CRM e atendimento", INTEGRACAO: "Integração" };
+
 export interface AttentionItem {
   severity: Severity;
   category: string;
+  channel?: AttentionChannel;
   fact: string;
   recommendation?: string;
   metric?: string;
@@ -226,37 +231,43 @@ export async function buildAttention(companyId: number, bi: CompanyBi, threshold
   const accounts = await listAccountsForCompany(companyId);
   for (const a of accounts) {
     if (a.connection_status === "RECONEXAO_NECESSARIA" || a.connection_status === "EXPIRADA" || a.connection_status === "REVOGADA") {
-      items.push({ severity: "CRITICO", category: "Integração", fact: `${a.provider === "META" ? "Meta Ads" : "Google Ads"} (${a.name ?? a.external_account_id}) precisa ser reconectado.`, recommendation: "Peça à Hub Action para reconectar a conta.", dedupeKey: `reconexao:${a.id}:${day}` });
+      items.push({ severity: "CRITICO", category: "Integração", channel: "INTEGRACAO", fact: `${a.provider === "META" ? "Meta Ads" : "Google Ads"} (${a.name ?? a.external_account_id}) precisa ser reconectado.`, recommendation: "Peça à Hub Action para reconectar a conta.", dedupeKey: `reconexao:${a.id}:${day}` });
       continue;
     }
     if (a.sync_enabled && a.last_success_at) {
       const hours = (now.getTime() - new Date(a.last_success_at).getTime()) / 3600000;
       if (hours >= thresholds.hoursWithoutSync) {
-        items.push({ severity: hours >= 24 ? "CRITICO" : "ATENCAO", category: "Integração", fact: `${a.provider === "META" ? "Meta Ads" : "Google Ads"} (${a.name ?? a.external_account_id}) não sincroniza há ${Math.floor(hours)} horas.`, recommendation: "Use \"Atualizar agora\" ou verifique a conexão.", metric: "horas_sem_sync", currentValue: `${Math.floor(hours)}h`, referenceValue: `${thresholds.hoursWithoutSync}h`, dedupeKey: `sync:${a.id}:${day}` });
+        items.push({ severity: hours >= 24 ? "CRITICO" : "ATENCAO", category: "Integração", channel: "INTEGRACAO", fact: `${a.provider === "META" ? "Meta Ads" : "Google Ads"} (${a.name ?? a.external_account_id}) não sincroniza há ${Math.floor(hours)} horas.`, recommendation: "Use \"Atualizar agora\" ou verifique a conexão.", metric: "horas_sem_sync", currentValue: `${Math.floor(hours)}h`, referenceValue: `${thresholds.hoursWithoutSync}h`, dedupeKey: `sync:${a.id}:${day}` });
       }
     } else if (a.sync_enabled && !a.last_success_at) {
-      items.push({ severity: "INFORMACAO", category: "Integração", fact: `${a.provider === "META" ? "Meta Ads" : "Google Ads"} (${a.name ?? a.external_account_id}) ainda não teve nenhuma sincronização concluída.`, dedupeKey: `nosync:${a.id}:${day}` });
+      items.push({ severity: "INFORMACAO", category: "Integração", channel: "INTEGRACAO", fact: `${a.provider === "META" ? "Meta Ads" : "Google Ads"} (${a.name ?? a.external_account_id}) ainda não teve nenhuma sincronização concluída.`, dedupeKey: `nosync:${a.id}:${day}` });
+    }
+  }
+
+  for (const p of ["META", "GOOGLE"] as const) {
+    if (!accounts.some((a) => a.provider === p)) {
+      items.push({ severity: "INFORMACAO", category: "Integração", channel: "INTEGRACAO", fact: `${PROVIDER_LABELS[p]} não conectado para esta empresa.`, recommendation: "Sem conta vinculada, investimento, CPL, CAC e ROAS deste canal ficam indisponíveis (nunca são estimados).", dedupeKey: `naoconectado:${p}:${day}` });
     }
   }
 
   // Campanhas gastando sem lead atribuído (no período)
   for (const row of bi.campaigns) {
     if (row.platform.spendCents >= thresholds.spendWithoutLeadCents && row.crm.leads === 0) {
-      items.push({ severity: "CRITICO", category: "Campanha", fact: `Campanha "${row.campaign.name}" investiu ${fmtBRL(row.platform.spendCents)} no período sem gerar lead atribuído.`, recommendation: "Confira se a atribuição está chegando (UTM/anúncio de WhatsApp) e revise a campanha.", metric: "investimento_sem_lead", currentValue: fmtBRL(row.platform.spendCents), referenceValue: fmtBRL(thresholds.spendWithoutLeadCents), dedupeKey: `semlead:${row.campaign.id}:${day}` });
+      items.push({ severity: "CRITICO", category: "Campanha", channel: row.campaign.provider, fact: `Campanha "${row.campaign.name}" investiu ${fmtBRL(row.platform.spendCents)} no período sem gerar lead atribuído.`, recommendation: "Confira se a atribuição está chegando (UTM/anúncio de WhatsApp) e revise a campanha.", metric: "investimento_sem_lead", currentValue: fmtBRL(row.platform.spendCents), referenceValue: fmtBRL(thresholds.spendWithoutLeadCents), dedupeKey: `semlead:${row.campaign.id}:${day}` });
     }
   }
 
   // CPL / CAC vs período anterior
   const cplDelta = deltaPercent(cur.kpis.cpl, prev.kpis.cpl);
   if (cplDelta !== null && cplDelta >= thresholds.cplIncreasePct) {
-    items.push({ severity: "ATENCAO", category: "Custo", fact: `CPL aumentou ${fmtDelta(cplDelta)} em relação ao período anterior (${fmtBRL(prev.kpis.cpl)} → ${fmtBRL(cur.kpis.cpl)}).`, recommendation: "Analise as campanhas que mais aumentaram de custo.", metric: "cpl", currentValue: fmtBRL(cur.kpis.cpl), referenceValue: fmtBRL(prev.kpis.cpl), dedupeKey: `cpl_up:${day}` });
+    items.push({ severity: "ATENCAO", category: "Custo", channel: "MIDIA", fact: `CPL aumentou ${fmtDelta(cplDelta)} em relação ao período anterior (${fmtBRL(prev.kpis.cpl)} → ${fmtBRL(cur.kpis.cpl)}).`, recommendation: "Analise as campanhas que mais aumentaram de custo.", metric: "cpl", currentValue: fmtBRL(cur.kpis.cpl), referenceValue: fmtBRL(prev.kpis.cpl), dedupeKey: `cpl_up:${day}` });
   }
   const cacDelta = deltaPercent(cur.kpis.cac, prev.kpis.cac);
   if (cacDelta !== null && cacDelta >= thresholds.cacIncreasePct) {
-    items.push({ severity: "ATENCAO", category: "Custo", fact: `CAC aumentou ${fmtDelta(cacDelta)} em relação ao período anterior (${fmtBRL(prev.kpis.cac)} → ${fmtBRL(cur.kpis.cac)}).`, metric: "cac", currentValue: fmtBRL(cur.kpis.cac), referenceValue: fmtBRL(prev.kpis.cac), dedupeKey: `cac_up:${day}` });
+    items.push({ severity: "ATENCAO", category: "Custo", channel: "MIDIA", fact: `CAC aumentou ${fmtDelta(cacDelta)} em relação ao período anterior (${fmtBRL(prev.kpis.cac)} → ${fmtBRL(cur.kpis.cac)}).`, metric: "cac", currentValue: fmtBRL(cur.kpis.cac), referenceValue: fmtBRL(prev.kpis.cac), dedupeKey: `cac_up:${day}` });
   }
   if (cplDelta !== null && cacDelta !== null && cplDelta < 0 && cacDelta > 0) {
-    items.push({ severity: "ATENCAO", category: "Qualidade", fact: `CPL caiu ${fmtDelta(cplDelta)} mas o CAC subiu ${fmtDelta(cacDelta)}: os leads ficaram mais baratos e converteram menos.`, recommendation: "Compare qualificação por campanha antes de aumentar investimento nas mais baratas.", dedupeKey: `cpl_down_cac_up:${day}` });
+    items.push({ severity: "ATENCAO", category: "Qualidade", channel: "MIDIA", fact: `CPL caiu ${fmtDelta(cplDelta)} mas o CAC subiu ${fmtDelta(cacDelta)}: os leads ficaram mais baratos e converteram menos.`, recommendation: "Compare qualificação por campanha antes de aumentar investimento nas mais baratas.", dedupeKey: `cpl_down_cac_up:${day}` });
   }
 
   // CAC por campanha vs média da empresa
@@ -266,9 +277,9 @@ export async function buildAttention(companyId: number, bi: CompanyBi, threshold
       if (row.kpis.cac === null || row.crm.newCustomers < 2) continue;
       const diff = ((row.kpis.cac - cacAvg) / cacAvg) * 100;
       if (diff >= thresholds.cacAboveAvgPct) {
-        items.push({ severity: "ATENCAO", category: "Campanha", fact: `CAC da campanha "${row.campaign.name}" está ${fmtDelta(diff)} acima da média da empresa (${fmtBRL(row.kpis.cac)} vs ${fmtBRL(cacAvg)}).`, metric: "cac_campanha", currentValue: fmtBRL(row.kpis.cac), referenceValue: fmtBRL(cacAvg), dedupeKey: `cac_alto:${row.campaign.id}:${day}` });
+        items.push({ severity: "ATENCAO", category: "Campanha", channel: row.campaign.provider, fact: `CAC da campanha "${row.campaign.name}" está ${fmtDelta(diff)} acima da média da empresa (${fmtBRL(row.kpis.cac)} vs ${fmtBRL(cacAvg)}).`, metric: "cac_campanha", currentValue: fmtBRL(row.kpis.cac), referenceValue: fmtBRL(cacAvg), dedupeKey: `cac_alto:${row.campaign.id}:${day}` });
       } else if (diff <= -thresholds.cacAboveAvgPct * 0.8) {
-        items.push({ severity: "OPORTUNIDADE", category: "Campanha", fact: `Campanha "${row.campaign.name}" tem CAC ${fmtDelta(Math.abs(diff))} menor que a média da empresa (${fmtBRL(row.kpis.cac)} vs ${fmtBRL(cacAvg)}).`, recommendation: "Candidata a receber mais investimento — confira se a qualidade se mantém com escala.", dedupeKey: `cac_baixo:${row.campaign.id}:${day}` });
+        items.push({ severity: "OPORTUNIDADE", category: "Campanha", channel: row.campaign.provider, fact: `Campanha "${row.campaign.name}" tem CAC ${fmtDelta(Math.abs(diff))} menor que a média da empresa (${fmtBRL(row.kpis.cac)} vs ${fmtBRL(cacAvg)}).`, recommendation: "Candidata a receber mais investimento — confira se a qualidade se mantém com escala.", dedupeKey: `cac_baixo:${row.campaign.id}:${day}` });
       }
     }
   }
@@ -279,30 +290,98 @@ export async function buildAttention(companyId: number, bi: CompanyBi, threshold
     const freq = cur.platform.frequency;
     const prevFreq = prev.platform.frequency;
     const freqText = freq !== null && prevFreq !== null ? ` A frequência foi de ${fmtNum(prevFreq)} para ${fmtNum(freq)} no mesmo período.` : "";
-    items.push({ severity: "ATENCAO", category: "Anúncios", fact: `CTR caiu ${fmtDelta(ctrDelta)} em comparação ao período anterior.${freqText}`, recommendation: freq !== null && prevFreq !== null && freq > prevFreq * 1.5 ? "Vale revisar o criativo — a mesma audiência está vendo o anúncio mais vezes." : undefined, dedupeKey: `ctr_down:${day}` });
+    items.push({ severity: "ATENCAO", category: "Anúncios", channel: "MIDIA", fact: `CTR caiu ${fmtDelta(ctrDelta)} em comparação ao período anterior.${freqText}`, recommendation: freq !== null && prevFreq !== null && freq > prevFreq * 1.5 ? "Vale revisar o criativo — a mesma audiência está vendo o anúncio mais vezes." : undefined, dedupeKey: `ctr_down:${day}` });
   }
 
   // Taxa de comparecimento
   if (cur.kpis.attendanceRate !== null && prev.kpis.attendanceRate !== null && cur.crm.appointments >= 5) {
     const drop = (prev.kpis.attendanceRate - cur.kpis.attendanceRate) * 100;
     if (drop >= thresholds.attendanceDropPct) {
-      items.push({ severity: "ATENCAO", category: "Atendimento", fact: `Taxa de comparecimento caiu de ${fmtPct(prev.kpis.attendanceRate)} para ${fmtPct(cur.kpis.attendanceRate)}.`, recommendation: "Revise confirmação e lembretes antes dos horários.", dedupeKey: `comparecimento_down:${day}` });
+      items.push({ severity: "ATENCAO", category: "Atendimento", channel: "CRM", fact: `Taxa de comparecimento caiu de ${fmtPct(prev.kpis.attendanceRate)} para ${fmtPct(cur.kpis.attendanceRate)}.`, recommendation: "Revise confirmação e lembretes antes dos horários.", dedupeKey: `comparecimento_down:${day}` });
     }
   }
 
   // Oportunidade: melhor qualificação
   const best = bi.campaigns.filter((r) => r.crm.leads >= 10 && r.kpis.qualificationRate !== null).sort((a, b) => (b.kpis.qualificationRate ?? 0) - (a.kpis.qualificationRate ?? 0))[0];
   if (best && (best.kpis.qualificationRate ?? 0) > 0) {
-    items.push({ severity: "OPORTUNIDADE", category: "Campanha", fact: `"${best.campaign.name}" tem a maior taxa de qualificação do período (${fmtPct(best.kpis.qualificationRate)}).`, dedupeKey: `melhor_qualif:${best.campaign.id}:${day}` });
+    items.push({ severity: "OPORTUNIDADE", category: "Campanha", channel: best.campaign.provider, fact: `"${best.campaign.name}" tem a maior taxa de qualificação do período (${fmtPct(best.kpis.qualificationRate)}).`, dedupeKey: `melhor_qualif:${best.campaign.id}:${day}` });
   }
 
   // Aguardando humano
   if (bi.sla.longestOpenWaitMs !== null && bi.sla.longestOpenWaitMs > 60 * 60 * 1000) {
-    items.push({ severity: "CRITICO", category: "Atendimento", fact: `Há cliente aguardando atendente humano há ${Math.floor(bi.sla.longestOpenWaitMs / 3600000)}h sem resposta.`, recommendation: "Abra a Caixa de Entrada e responda.", dedupeKey: `espera_longa:${day}` });
+    items.push({ severity: "CRITICO", category: "Atendimento", channel: "CRM", fact: `Há cliente aguardando atendente humano há ${Math.floor(bi.sla.longestOpenWaitMs / 3600000)}h sem resposta.`, recommendation: "Abra a Caixa de Entrada e responda.", dedupeKey: `espera_longa:${day}` });
   }
 
   const order: Record<Severity, number> = { CRITICO: 0, ATENCAO: 1, OPORTUNIDADE: 2, INFORMACAO: 3 };
   return items.sort((a, b) => order[a.severity] - order[b.severity]);
+}
+
+// --- Custo x qualidade por canal (Meta x Google) ---------------------------------
+
+export interface ChannelCostQualityRow {
+  provider: MarketingProvider;
+  label: string;
+  connected: boolean;
+  spendCents: number | null;
+  leads: number;
+  customers: number;
+  cpl: number | null;
+  cac: number | null;
+  qualificationRate: number | null;
+  closeRate: number | null;
+}
+
+export interface ChannelCostQuality {
+  rows: ChannelCostQualityRow[];
+  cheapestLead: MarketingProvider | null;
+  cheapestCustomer: MarketingProvider | null;
+  bestQuality: MarketingProvider | null;
+  /** Frases por regra, só com números presentes — separam fato de leitura. */
+  facts: string[];
+}
+
+/**
+ * Responde "qual canal traz lead/cliente mais barato e leads de mais qualidade?"
+ * comparando só provedores com investimento no período. Se um canal tem CPL
+ * maior mas CAC menor, diz isso explicitamente — CPL sozinho não classifica.
+ */
+export function channelCostQuality(providers: CompanyBi["providers"]): ChannelCostQuality {
+  const rows: ChannelCostQualityRow[] = providers.map((p) => ({
+    provider: p.provider,
+    label: PROVIDER_LABELS[p.provider],
+    connected: p.connected,
+    spendCents: p.platform.hasSpendData ? p.platform.spendCents : null,
+    leads: p.crm.leads,
+    customers: p.crm.newCustomers,
+    cpl: p.kpis.cpl,
+    cac: p.kpis.cac,
+    qualificationRate: p.kpis.qualificationRate,
+    closeRate: p.kpis.closeRate,
+  }));
+  const withSpend = rows.filter((r) => r.spendCents !== null && r.spendCents > 0);
+  const pick = (key: "cpl" | "cac" | "closeRate", dir: "asc" | "desc", minLeads: number): MarketingProvider | null => {
+    const c = withSpend.filter((r) => r[key] !== null && r.leads >= minLeads);
+    if (c.length < 2) return null;
+    c.sort((a, b) => (dir === "asc" ? (a[key] as number) - (b[key] as number) : (b[key] as number) - (a[key] as number)));
+    return c[0].provider;
+  };
+  const cheapestLead = pick("cpl", "asc", 1);
+  const cheapestCustomer = pick("cac", "asc", 1);
+  const bestQuality = pick("closeRate", "desc", 5);
+  const by = (p: MarketingProvider) => rows.find((r) => r.provider === p)!;
+  const facts: string[] = [];
+  if (withSpend.length === 1) {
+    facts.push(`Só ${withSpend[0].label} tem investimento no período — a comparação de custo entre canais depende de o outro provedor estar conectado e investindo.`);
+  }
+  if (cheapestLead) facts.push(`Lead mais barato: ${by(cheapestLead).label} (CPL ${fmtBRL(by(cheapestLead).cpl)}).`);
+  if (cheapestCustomer) facts.push(`Cliente mais barato: ${by(cheapestCustomer).label} (CAC ${fmtBRL(by(cheapestCustomer).cac)}).`);
+  if (bestQuality) facts.push(`Maior taxa de fechamento: ${by(bestQuality).label} (${fmtPct(by(bestQuality).closeRate)}).`);
+  if (cheapestLead && cheapestCustomer && cheapestLead !== cheapestCustomer) {
+    const a = by(cheapestCustomer);
+    const b = by(cheapestLead);
+    facts.push(`${a.label} tem CPL maior que ${b.label} (${fmtBRL(a.cpl)} vs ${fmtBRL(b.cpl)}), mas CAC menor (${fmtBRL(a.cac)} vs ${fmtBRL(b.cac)}): traz o cliente mais barato. Não classifique canais só pelo CPL.`);
+  }
+  return { rows, cheapestLead, cheapestCustomer, bestQuality, facts };
 }
 
 // --- Custo x qualidade ---------------------------------------------------------

@@ -353,6 +353,10 @@ export interface DerivedKpis {
   /** receita total do CRM / investimento — referência, não atribuída. */
   roasTotal: number | null;
   conversationsPerSale: number | null;
+  /** Conversões reportadas pela plataforma ÷ cliques (definição do provedor, ex.: Google Ads; não é do CRM). */
+  platformConversionRate: number | null;
+  /** Investimento ÷ conversões reportadas pela plataforma. */
+  costPerPlatformConversion: number | null;
 }
 
 export interface PeriodSnapshot {
@@ -465,6 +469,8 @@ export function deriveKpis(platform: PlatformMetrics, crm: CrmMetrics): DerivedK
     roasCrm: spend ? ratio(crm.attributedRevenueCents, spend) : null,
     roasTotal: spend ? ratio(crm.revenueCents, spend) : null,
     conversationsPerSale: ratio(crm.conversations, crm.sales),
+    platformConversionRate: ratio(platform.platformConversions, platform.clicks),
+    costPerPlatformConversion: ratio(spend, platform.platformConversions),
   };
 }
 
@@ -740,6 +746,8 @@ export interface CompanyBi {
   previous: PeriodSnapshot;
   daily: DailyPoint[];
   previousDaily: DailyPoint[];
+  /** Série diária só de cada provedor (mesmos filtros, canal forçado) — para comparar Meta x Google no tempo. */
+  dailyByProvider: Record<MarketingProvider, DailyPoint[]>;
   campaigns: CampaignRow[];
   channels: ChannelRow[];
   providers: ProviderComparison[];
@@ -766,6 +774,10 @@ export async function computeCompanyBi(companyId: number, timeZone: string, peri
     previous,
     daily: dailySeries(facts, period.current, timeZone, filters),
     previousDaily: dailySeries(facts, period.previous, timeZone, filters),
+    dailyByProvider: {
+      META: dailySeries(facts, period.current, timeZone, { ...filters, channel: "META_ADS" }),
+      GOOGLE: dailySeries(facts, period.current, timeZone, { ...filters, channel: "GOOGLE_ADS" }),
+    },
     campaigns: await campaignRows(companyId, facts, period.current, timeZone, filters),
     channels: channelRows(facts, period.current, timeZone, filters),
     providers: await providerComparison(companyId, facts, period.current, timeZone, filters),

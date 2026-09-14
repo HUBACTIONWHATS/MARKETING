@@ -216,7 +216,7 @@ export function adminMarketingPage(o: {
   </div>`;
 
   const rank = (title: string, items: CompanySummary[], value: (s: CompanySummary) => string) =>
-    `<div class="card-block"><h3>${escapeHtml(title)}</h3>${items.length ? `<ol style="margin:0;padding-left:1.2rem;font-size:0.85rem">${items.map((s) => `<li>${escapeHtml(s.company.name)} <span class="muted">— ${value(s)}</span></li>`).join("")}</ol>` : '<p class="muted small">Sem dados suficientes.</p>'}</div>`;
+    `<div class="card-block"><h3>${escapeHtml(title)}</h3>${items.length ? `<ol style="margin:0;padding-left:1.2rem;font-size:0.85rem">${items.map((s) => `<li><a href="/empresa/${s.company.id}/marketing" title="Abrir Meta Ads + Google Ads + CRM desta empresa">${escapeHtml(s.company.name)}</a> <span class="muted">— ${value(s)}</span></li>`).join("")}</ol>` : '<p class="muted small">Sem dados suficientes.</p>'}</div>`;
   const withSpend = S.filter((s) => s.bi.current.platform.hasSpendData);
   const rankings = `<div class="grid-12">
     <div class="col-4">${rank("Maior investimento", [...withSpend].sort((a, b) => b.bi.current.platform.spendCents - a.bi.current.platform.spendCents).slice(0, 5), (s) => fmtBRL(s.bi.current.platform.spendCents))}</div>
@@ -310,7 +310,7 @@ export function adminAgencyPage(o: { summaries: CompanySummary[]; periodLabel: s
       const meta = s.accounts.filter((a) => a.provider === "META");
       const google = s.accounts.filter((a) => a.provider === "GOOGLE");
       return `<tr>
-        <td class="left"><a href="/admin/agencia/empresa/${s.company.id}">${escapeHtml(s.company.name)}</a></td>
+        <td class="left"><a href="/empresa/${s.company.id}/marketing" title="Abrir a central de marketing da empresa (Meta + Google + CRM)">${escapeHtml(s.company.name)}</a> <a class="small muted" href="/admin/agencia/empresa/${s.company.id}">resumo</a></td>
         <td class="left">${s.company.suspended ? '<span class="chip chip-bad">suspensa</span>' : `<span class="chip chip-muted">${escapeHtml(s.company.plan.toLowerCase())}</span>`}</td>
         <td class="left">${chip(meta.length > 0, meta.every((a) => a.connection_status === "CONECTADA" && !a.last_error_sanitized))}</td>
         <td class="left">${chip(google.length > 0, google.every((a) => a.connection_status === "CONECTADA" && !a.last_error_sanitized))}</td>

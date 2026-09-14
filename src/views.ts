@@ -1,3 +1,5 @@
+import { currentShell, PROVIDER_NAV_LABEL, type ShellContext } from "./shellContext";
+import type { MarketingProvider } from "./marketingModels";
 import type {
   AuthorType,
   Conversation,
@@ -195,7 +197,7 @@ const BASE_STYLE = `
   .empty-state .es-icon { width: 40px; height: 40px; border-radius: 10px; background: var(--accent-soft); color: var(--accent); display: inline-flex; align-items: center; justify-content: center; }
   .grid-2 { display: grid; grid-template-columns: 2fr 1fr; gap: var(--s5); align-items: start; }
   .grid-12 { display: grid; grid-template-columns: repeat(12, minmax(0, 1fr)); gap: var(--s4); margin-bottom: var(--s4); }
-  .col-12 { grid-column: span 12; } .col-8 { grid-column: span 8; } .col-7 { grid-column: span 7; } .col-6 { grid-column: span 6; } .col-4 { grid-column: span 4; } .col-3 { grid-column: span 3; }
+  .col-12 { grid-column: span 12; } .col-8 { grid-column: span 8; } .col-7 { grid-column: span 7; } .col-6 { grid-column: span 6; } .col-5 { grid-column: span 5; } .col-4 { grid-column: span 4; } .col-3 { grid-column: span 3; }
   .grid-12 > [class*="col-"] > .card-block { height: 100%; margin-bottom: 0; }
   .field { margin-bottom: var(--s3); }
   .field label { font-size: 12.5px; color: var(--text-muted); display: block; margin-bottom: var(--s1); }
@@ -358,13 +360,41 @@ const BASE_STYLE = `
   .skeleton { background: linear-gradient(90deg, #1e293b 25%, #273449 50%, #1e293b 75%); background-size: 200% 100%; border-radius: 4px; min-height: 1em; animation: shimmer 1.4s infinite; }
   @keyframes shimmer { 0% { background-position: 200% 0; } 100% { background-position: -200% 0; } }
 
+  /* ---------- Command Center: menu com estado do provedor, procedência dos dados, comparativo ---------- */
+  .nav-status { width: 7px; height: 7px; border-radius: 50%; margin-left: auto; background: var(--text-faint); flex-shrink: 0; }
+  .nav-status.on { background: var(--success); } .nav-status.warn { background: var(--warning); }
+  .provenance { display: flex; gap: var(--s2); flex-wrap: wrap; align-items: center; margin: 0 0 var(--s4); }
+  .provenance .chip { background: var(--surface); }
+  .chip-xs { font-size: 10px; padding: 2px 6px; letter-spacing: 0.04em; }
+  .kpi .kpi-label .chip-xs { margin-left: auto; }
+  .compare-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }
+  .compare-table th { text-align: right; font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--text-muted); padding: 8px 12px; border-bottom: 1px solid var(--border-strong); background: var(--surface); }
+  .compare-table th:first-child { text-align: left; }
+  .compare-table td { padding: 7px 12px; border-bottom: 1px solid var(--border); text-align: right; font-variant-numeric: tabular-nums; }
+  .compare-table td:first-child { text-align: left; color: var(--text-secondary); }
+  .compare-table tbody tr:last-child td { border-bottom: none; }
+  .compare-table tbody tr:hover td { background: rgba(56,189,248,0.05); }
+  .compare-table .best { color: var(--success); font-weight: 600; }
+  .compare-table .na { color: var(--text-faint); }
+  .empty-state .actions { display: flex; gap: var(--s2); justify-content: center; margin-top: var(--s4); flex-wrap: wrap; }
+  .integration-cards { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s4); }
+  .integration-card { border: 1px solid var(--border); border-radius: var(--radius-md); padding: var(--s4); background: var(--surface-2); display: flex; flex-direction: column; gap: 6px; }
+  .integration-card h4 { margin: 0; font-size: 14px; display: flex; align-items: center; gap: var(--s2); }
+  .integration-card dl { display: grid; grid-template-columns: auto 1fr; gap: 4px var(--s3); margin: 0; font-size: 12.5px; }
+  .integration-card dt { color: var(--text-muted); } .integration-card dd { margin: 0; }
+  .seg-links { display: inline-flex; gap: 4px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-pill); padding: 3px; }
+  .seg-links a { font-size: 12px; padding: 4px 10px; border-radius: var(--r-pill); color: var(--text-secondary); text-decoration: none; }
+  .seg-links a.active { background: var(--accent); color: #0b1220; font-weight: 600; }
+  .fact-list { margin: 0; padding-left: 18px; font-size: 13px; line-height: 1.6; }
+  @media (max-width: 720px) { .integration-cards { grid-template-columns: 1fr; } }
+
   /* ---------- Responsividade (desktop primeiro: 1920 → 1280 intactos) ---------- */
   @media (max-width: 1200px) {
     .content { padding: var(--s5) var(--s5) var(--s6); }
     .topbar { padding-left: var(--s5); padding-right: var(--s5); }
   }
   @media (max-width: 960px) {
-    .col-8, .col-7, .col-6, .col-4, .col-3 { grid-column: span 12; }
+    .col-8, .col-7, .col-6, .col-5, .col-4, .col-3 { grid-column: span 12; }
     .metrics-grid, .kpi-grid, .col-8 .kpi-grid, .col-7 .kpi-grid, .col-6 .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .provider-compare { grid-template-columns: 1fr; }
     .goal-row { grid-template-columns: 1fr 1fr 1fr; }
@@ -817,21 +847,32 @@ export function whatsappAdminPage(opts: {
 export interface NavItem {
   key: string;
   label: string;
+  /** Item que representa um provedor de mídia: mostra o estado (conectado / não conectado) ao lado. */
+  provider?: MarketingProvider;
 }
 
+/** OPERAÇÃO */
 export const NAV_ITEMS: NavItem[] = [
   { key: "dashboard", label: "Dashboard" },
   { key: "conversas", label: "Conversas" },
   { key: "crm", label: "CRM" },
-  { key: "relatorios", label: "Relatórios" },
-  { key: "configuracoes", label: "Configurações" },
 ];
 
-/** Itens de mídia paga/inteligência: administrador da empresa sempre; atendente só com a capability can_view_marketing. */
+/** MARKETING — mídia paga/inteligência: administrador geral sempre; administrador da empresa sempre; atendente só com a capability can_view_marketing. Meta e Google aparecem SEMPRE (mesmo sem conexão). */
 export const MARKETING_NAV_ITEMS: NavItem[] = [
-  { key: "marketing", label: "Marketing" },
+  { key: "marketing", label: "Visão Geral" },
+  { key: "marketing/meta", label: "Meta Ads", provider: "META" },
+  { key: "marketing/google", label: "Google Ads", provider: "GOOGLE" },
+  { key: "marketing/campanhas", label: "Campanhas" },
+  { key: "marketing/funil", label: "Funil & Conversão" },
   { key: "inteligencia", label: "Inteligência" },
   { key: "alertas", label: "Alertas" },
+];
+
+/** GESTÃO */
+export const MANAGEMENT_NAV_ITEMS: NavItem[] = [
+  { key: "relatorios", label: "Relatórios" },
+  { key: "configuracoes", label: "Configurações" },
 ];
 
 const ROLE_LABEL: Record<Role, string> = {
@@ -847,7 +888,11 @@ const BRAND_MARK = `<svg viewBox="0 0 40 32" aria-hidden="true"><path d="M3 9l8-
 const NAV_ICONS: Record<string, string> = {
   dashboard: svgIcon('<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>'),
   conversas: svgIcon('<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/>'),
-  crm: svgIcon('<path d="M3 5h18l-7 8v5l-4 2v-7z"/>'),
+  crm: svgIcon('<circle cx="9" cy="8" r="3.5"/><path d="M2.5 20a6.5 6.5 0 0 1 13 0"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7"/><path d="M18.5 13.5a6 6 0 0 1 3 5"/>'),
+  "marketing/meta": svgIcon('<circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5"/>'),
+  "marketing/google": svgIcon('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>'),
+  "marketing/campanhas": svgIcon('<path d="m12 3 9 5-9 5-9-5z"/><path d="m3 13 9 5 9-5"/>'),
+  "marketing/funil": svgIcon('<path d="M4 4h16l-6 8v6l-4 2v-8z"/>'),
   relatorios: svgIcon('<path d="M4 20h16"/><path d="M7 16V9"/><path d="M12 16V5"/><path d="M17 16v-6"/>'),
   configuracoes: svgIcon('<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>'),
   marketing: svgIcon('<path d="M3 11v2a1 1 0 0 0 1 1h2l5 4V6L6 10H4a1 1 0 0 0-1 1z"/><path d="M15 9.5a3.5 3.5 0 0 1 0 5"/><path d="M18 7a7 7 0 0 1 0 10"/>'),
@@ -861,16 +906,22 @@ export function appShell(opts: {
   role: Role;
   active: string;
   body: string;
-  /** Mostra Marketing/Inteligência/Alertas no menu (decidido no servidor, não no navegador). */
+  /** Mostra o grupo Marketing no menu (decidido no servidor, não no navegador). Se omitido, usa o contexto de shell da requisição. */
   canViewMarketing?: boolean;
+  /** Contexto de shell explícito (testes); por padrão vem do middleware da requisição. */
+  nav?: ShellContext;
 }): string {
-  const link = (item: NavItem) =>
-    `<a href="/empresa/${opts.company.id}/${item.key}" class="${item.key === opts.active ? "active" : ""}" ${item.key === opts.active ? 'aria-current="page"' : ""}>${NAV_ICONS[item.key] ?? ""}<span>${item.label}</span></a>`;
-  const showMarketing = opts.canViewMarketing ?? opts.role === "COMPANY_ADMIN";
-  const nav =
-    `<div class="nav-group">Operação</div>` +
-    NAV_ITEMS.map(link).join("") +
-    (showMarketing ? `<div class="nav-group">Performance</div>${MARKETING_NAV_ITEMS.map(link).join("")}` : "");
+  const shell = opts.nav ?? currentShell();
+  const link = (item: NavItem) => {
+    const active = item.key === opts.active;
+    const status = item.provider && shell ? shell.providers[item.provider] : undefined;
+    const dot = status ? `<span class="nav-status ${status === "CONECTADO" ? "on" : status === "RECONEXAO" ? "warn" : "off"}" title="${PROVIDER_NAV_LABEL[status]}"></span>` : "";
+    return `<a href="/empresa/${opts.company.id}/${item.key}" class="${active ? "active" : ""}" ${active ? 'aria-current="page"' : ""}>${NAV_ICONS[item.key] ?? ""}<span>${escapeHtml(item.label)}</span>${dot}</a>`;
+  };
+  const showMarketing = opts.canViewMarketing ?? shell?.canViewMarketing ?? opts.role === "COMPANY_ADMIN";
+  const group = (title: string, items: NavItem[]) => `<div class="nav-group">${title}</div>${items.map(link).join("")}`;
+  const nav = group("Operação", NAV_ITEMS) + (showMarketing ? group("Marketing", MARKETING_NAV_ITEMS) : "") + group("Gestão", MANAGEMENT_NAV_ITEMS);
+  const roleLabel = Number(opts.user.is_platform_admin) === 1 || shell?.isPlatformAdmin ? "Administrador geral (Hub Action)" : ROLE_LABEL[opts.role];
 
   // Modo de demonstração: mesmo critério do simulador (fora de produção, tudo é dado fictício).
   const demoBanner = IS_DEMO
@@ -888,7 +939,7 @@ export function appShell(opts: {
         <div class="topbar">
           <div>
             <div class="company">${escapeHtml(opts.company.name)}</div>
-            <div class="who">${escapeHtml(opts.user.name)} &middot; ${ROLE_LABEL[opts.role]}</div>
+            <div class="who">${escapeHtml(opts.user.name)} &middot; ${roleLabel}</div>
           </div>
           <form method="post" action="/logout"><button type="submit" class="logout">Sair</button></form>
         </div>
