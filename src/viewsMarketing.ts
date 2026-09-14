@@ -10,12 +10,13 @@ import { CONFIDENCE_LABELS, SOURCE_LABELS, type AttributionConfidence, type Lead
 import type { AlertRow, AlertStatus } from "./alerts";
 import type { BiFilters, CampaignRow, CompanyBi, DailyPoint, PeriodSnapshot, ResolvedPeriod } from "./bi";
 import { deltaPercent } from "./bi";
-import { barChart, bubbleChart, COLORS, emptyChart, funnelChart, lineChart, sparkline, type Series } from "./charts";
+import { barChart, bubbleChart, COLORS, emptyChart, funnelChart, gaugeChart, lineChart, sparkline, type Series } from "./charts";
 import {
   fmtBRL,
   fmtDelta,
   fmtNum,
   fmtPct,
+  HEALTH_THRESHOLDS,
   SEVERITY_LABELS,
   TEMPERATURE_LABELS,
   type AttentionItem,
@@ -170,6 +171,11 @@ function tabs(companyId: number, active: string, qs: string): string {
   return `<div class="tabs">${TABS.map((t) => `<a href="/empresa/${companyId}/marketing${t.path}${qs}" class="${t.key === active ? "active" : ""}">${t.label}</a>`).join("")}</div>`;
 }
 
+/** Cabeçalho de um gráfico dentro de um card: título, subtítulo e ações à direita (só apresentação). */
+function chartHead(title: string, sub: string, right = "", compact = false): string {
+  return `<div class="chart-head${compact ? " compact" : ""}"><div><h3>${escapeHtml(title)}</h3>${sub ? `<div class="sub">${escapeHtml(sub)}</div>` : ""}</div>${right}</div>`;
+}
+
 function pageHead(title: string, sub: string, right = ""): string {
   return `<div class="page-head"><div><div class="eyebrow">HUB ACTION · Command Center</div><h2>${escapeHtml(title)}</h2><div class="sub">${escapeHtml(sub)}</div></div>${right}</div>`;
 }
@@ -314,7 +320,8 @@ export function channelChart(bi: CompanyBi, metric: "leads" | "vendas" | "receit
     return { label: SOURCE_LABELS[r.source], value, color, tooltip: `${SOURCE_LABELS[r.source]} — leads ${r.crm.leads}, qualificados ${r.crm.qualified}, vendas ${r.crm.sales}, receita ${fmtBRL(r.crm.revenueCents)}${r.hasSpend ? `, investimento ${fmtBRL(r.spendCents)}, CAC ${fmtBRL(r.kpis.cac)}` : ""}` };
   });
   const money = metric === "receita" || metric === "cac" || metric === "investimento";
-  return barChart({ items, format: money ? (v) => fmtBRL(Math.round(v)) : metric === "roas" ? (v) => `${fmtNum(v)}x` : (v) => fmtNum(v), ariaLabel: `Comparação de canais por ${metric}` });
+  const valueLabel = { leads: "Leads", vendas: "Clientes", receita: "Receita", cac: "CAC", investimento: "Investimento", qualificados: "Qualificados", roas: "ROAS" }[metric];
+  return barChart({ items, format: money ? (v) => fmtBRL(Math.round(v)) : metric === "roas" ? (v) => `${fmtNum(v)}x` : (v) => fmtNum(v), ariaLabel: `Comparação de canais por ${metric}`, valueLabel });
 }
 
 export function providerComparisonBlock(bi: CompanyBi): string {
@@ -475,7 +482,7 @@ export function marketingOverviewPage(base: MarketingPageBase): string {
     ${executiveCards(bi)}
     ${performanceChart(bi, basePath, qs, base.m1, base.m2)}
     <div class="grid-12">
-      <div class="col-6"><div class="card-block"><h3>Funil (anúncio → venda)</h3>${funnelBlock(base.funnel, company.id, qs)}</div></div>
+      <div class="col-6"><div class="card-block">${chartHead("Funil — do anúncio à venda", `${bi.period.label} · conversão etapa a etapa`)}${funnelBlock(base.funnel, company.id, qs)}</div></div>
       <div class="col-6"><div class="card-block"><h3>Meta Ads x Google Ads</h3>${providerComparisonBlock(bi)}</div></div>
     </div>
     <div class="card-block"><h3>Custo de aquisição</h3>${secondaryKpis(bi)}</div>
@@ -531,7 +538,7 @@ export function marketingCampaignDetailPage(
     </div>
     ${performanceChart(bi, basePath, qs, base.m1, base.m2)}
     <div class="grid-12">
-      <div class="col-6"><div class="card-block"><h3>Funil da campanha</h3>${funnelBlock(base.funnel, company.id, qs, false)}</div></div>
+      <div class="col-6"><div class="card-block">${chartHead("Funil da campanha", `${bi.period.label} · só contatos atribuídos a esta campanha`)}${funnelBlock(base.funnel, company.id, qs, false)}</div></div>
       <div class="col-6"><div class="card-block"><h3>Métricas da plataforma x resultados do CRM</h3>
         ${row ? `<dl style="display:grid;grid-template-columns:1fr auto;gap:0.3rem 1rem;font-size:0.85rem;margin:0">
           <dt class="muted">Conversas reportadas pela plataforma</dt><dd>${row.platform.platformConversations ?? "—"}</dd>
@@ -589,7 +596,7 @@ export function marketingFunnelPage(base: MarketingPageBase, bottlenecks: Bottle
     ${tabs(company.id, "funil", qs)}
     ${filterBar(`/empresa/${company.id}/marketing/funil`, bi.period, bi.filters, base.filterOptions, freshnessLabel(bi.freshness.lastSuccessAt))}
     <div class="grid-12">
-      <div class="col-8"><div class="card-block"><h3>Funil executivo</h3>${funnelBlock(base.funnel, company.id, qs)}
+      <div class="col-8"><div class="card-block">${chartHead("Funil executivo", `${bi.period.label} · do anúncio à receita`)}${funnelBlock(base.funnel, company.id, qs)}
         <p class="small muted" style="margin-top:0.75rem">Receita no período: <strong>${fmtBRL(bi.current.crm.revenueCents)}</strong> · Investimento: <strong>${bi.current.platform.hasSpendData ? fmtBRL(bi.current.platform.spendCents) : "—"}</strong></p></div></div>
       <div class="col-4"><div class="card-block"><h3>Possíveis gargalos</h3>${
         bottlenecks.length
@@ -597,11 +604,11 @@ export function marketingFunnelPage(base: MarketingPageBase, bottlenecks: Bottle
           : '<p class="muted small">Nenhuma passagem do funil abaixo do esperado com amostra suficiente (mínimo de 10 na etapa de origem).</p>'
       }</div></div>
     </div>
-    <div class="card-block"><h3>Canais</h3><div class="grid-12">
-      <div class="col-6"><div class="eyebrow" style="margin-bottom:0.4rem">Leads por canal</div>${channelChart(bi, "leads")}</div>
-      <div class="col-6"><div class="eyebrow" style="margin-bottom:0.4rem">Clientes por canal</div>${channelChart(bi, "vendas")}</div>
-      <div class="col-6"><div class="eyebrow" style="margin-bottom:0.4rem">Receita por canal</div>${channelChart(bi, "receita")}</div>
-      <div class="col-6"><div class="eyebrow" style="margin-bottom:0.4rem">CAC por canal (só mídia paga)</div>${channelChart(bi, "cac")}</div>
+    <div class="card-block">${chartHead("Canais", `${bi.period.label} · comparação por origem do contato`)}<div class="grid-12">
+      <div class="col-6">${chartHead("Leads por canal", "contatos novos no período", "", true)}${channelChart(bi, "leads")}</div>
+      <div class="col-6">${chartHead("Clientes por canal", "vendas concluídas no período", "", true)}${channelChart(bi, "vendas")}</div>
+      <div class="col-6">${chartHead("Receita por canal", "soma das vendas concluídas", "", true)}${channelChart(bi, "receita")}</div>
+      <div class="col-6">${chartHead("CAC por canal", "só mídia paga · investimento ÷ clientes", "", true)}${channelChart(bi, "cac")}</div>
     </div></div>`;
   return shellFor(base, "marketing", body);
 }
@@ -765,7 +772,18 @@ export function intelligencePage(o: IntelligencePageOpts): string {
         .map((m) => `<tr><td class="left">${escapeHtml(m.name)}</td>${sources.map((s) => `<td title="leads / vendas">${m.bySource[s].leads}/${m.bySource[s].sales} <span class="muted small">${fmtPct(m.bySource[s].closeRate)}</span></td>`).join("")}</tr>`)
         .join("")}</tbody></table></div><p class="small muted">Formato: leads/vendas e taxa de fechamento, por origem do contato. Compara só atendentes desta empresa.</p>`
     : "";
-  const healthHtml = `<div style="display:flex;align-items:center;gap:0.75rem;margin-bottom:0.6rem"><span class="semaforo semaforo-${health.semaphore}"></span><strong style="font-size:1.4rem">${health.score === null ? "—" : health.score}</strong><span class="muted">/ 100 · ${health.semaphore === "CINZA" ? "dados insuficientes" : health.semaphore.toLowerCase()}</span></div>
+  const semColor = health.semaphore === "VERDE" ? COLORS.positive : health.semaphore === "AMARELO" ? COLORS.warning : health.semaphore === "VERMELHO" ? COLORS.danger : COLORS.neutral;
+  const semText = health.semaphore === "CINZA" ? "dados insuficientes" : health.semaphore.toLowerCase();
+  const semChip = health.semaphore === "VERDE" ? "chip-ok" : health.semaphore === "AMARELO" ? "chip-warn" : health.semaphore === "VERMELHO" ? "chip-bad" : "chip-muted";
+  // Faixas do gauge = os mesmos limiares usados no cálculo (insights.ts), nunca números soltos.
+  const bands = [
+    { upTo: HEALTH_THRESHOLDS.AMARELO, color: COLORS.danger, label: `0–${HEALTH_THRESHOLDS.AMARELO - 1} vermelho` },
+    { upTo: HEALTH_THRESHOLDS.VERDE, color: COLORS.warning, label: `${HEALTH_THRESHOLDS.AMARELO}–${HEALTH_THRESHOLDS.VERDE - 1} amarelo` },
+    { upTo: 100, color: COLORS.positive, label: `${HEALTH_THRESHOLDS.VERDE}–100 verde` },
+  ];
+  const healthHtml = `${gaugeChart({ value: health.score, color: semColor, statusLabel: semText, bands, ariaLabel: `Saúde do marketing: ${health.score === null ? "sem dado suficiente" : `${health.score} de 100`} (${semText})` })}
+    <div class="gauge-status"><span class="chip ${semChip}"><span class="semaforo semaforo-${health.semaphore}"></span>${escapeHtml(semText)}</span></div>
+    <div class="gauge-legend">${bands.map((b) => `<span><i style="background:${b.color}"></i>${escapeHtml(b.label)}</span>`).join("")}</div>
     <details><summary class="small" style="cursor:pointer;color:#38bdf8">Como é calculado</summary><ul class="small" style="margin:0.5rem 0 0;padding-left:1.1rem">${health.components.map((cmp) => `<li>${escapeHtml(cmp.label)} (peso ${(cmp.weight * 100).toFixed(0)}%): ${cmp.score === null ? "sem dado suficiente" : `${cmp.score.toFixed(0)}`} — <span class="muted">${escapeHtml(cmp.explanation)}</span></li>`).join("")}</ul></details>
     ${health.reasons.length ? `<ul class="small" style="margin:0.5rem 0 0;padding-left:1.1rem;color:#fde68a">${health.reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ul>` : ""}`;
   const body = `${pageHead("Central de Performance", `${mesLabel} · ${o.projection.today} · comparações de 7 dias`)}
@@ -787,13 +805,13 @@ export function intelligencePage(o: IntelligencePageOpts): string {
     </div>
     <div class="grid-12">
       <div class="col-8"><div class="card-block"><h3>Meta do mês e projeção</h3>${goalsProgress(o.projection)}</div></div>
-      <div class="col-4"><div class="card-block"><h3>Saúde do marketing</h3>${healthHtml}</div></div>
+      <div class="col-4"><div class="card-block">${chartHead("Saúde do marketing", `Índice de 0 a 100 · ${health.components.length} componentes ponderados`)}${healthHtml}</div></div>
     </div>
     <div class="card-block"><h3>Resumo executivo</h3><p style="font-size:0.95rem;line-height:1.5">${escapeHtml(o.summary)}</p>
       <p class="small muted">Últimos 7 dias vs 7 anteriores — CPL ${s7.cpl === null ? "—" : fmtBRL(s7.cpl)} (${fmtDelta(deltaPercent(s7.cpl, p7.cpl))}) · CAC ${s7.cac === null ? "—" : fmtBRL(s7.cac)} (${fmtDelta(deltaPercent(s7.cac, p7.cac))}) · fechamento ${fmtPct(s7.closeRate)} (${fmtDelta(deltaPercent(s7.closeRate, p7.closeRate))})</p></div>
     <div class="card-block"><h3>Precisa de atenção</h3>${attentionBlock(o.attention)}</div>
     <div class="grid-12">
-      <div class="col-7 col-6"><div class="card-block"><h3>Funil executivo do mês</h3>${funnelBlock(o.funnel, company.id, "")}</div></div>
+      <div class="col-7 col-6"><div class="card-block">${chartHead("Funil executivo do mês", "Este mês · conversão etapa a etapa")}${funnelBlock(o.funnel, company.id, "")}</div></div>
       <div class="col-6"><div class="card-block"><h3>Detector de gargalos</h3>${
         o.bottlenecks.length
           ? `<ul class="attention-list">${o.bottlenecks.map((b) => `<li style="grid-template-columns:1fr"><div class="fact">${escapeHtml(b.fact)}</div><div class="hyp">${escapeHtml(b.hypothesis)}</div></li>`).join("")}</ul>`

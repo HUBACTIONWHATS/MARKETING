@@ -21,6 +21,8 @@ export const COLORS = {
   neutral: "#94a3b8",
   muted: "#475569",
   grid: "#1f2937",
+  axis: "#334155",
+  surface: "#111a2b",
   text: "#cbd5e1",
 };
 
@@ -116,14 +118,33 @@ function svgTooltip(x: number, y: number, W: number, title: string, lines: { lab
   const rows = lines
     .map((l, i) => {
       const ly = by + 10 + lineH + (i + 1) * lineH - 4;
-      const swatch = l.color ? `<rect x="${(bx + padX).toFixed(1)}" y="${(ly - 8).toFixed(1)}" width="8" height="8" rx="2" fill="${l.color}" />` : "";
-      return `${swatch}<text x="${(bx + padX + (l.color ? 13 : 0)).toFixed(1)}" y="${ly.toFixed(1)}" font-size="11.5" fill="${COLORS.text}">${escapeHtml(l.label)}</text>
+      const swatch = l.color ? `<rect x="${(bx + padX).toFixed(1)}" y="${(ly - 5).toFixed(1)}" width="10" height="2.5" rx="1.25" fill="${l.color}" />` : "";
+      return `${swatch}<text x="${(bx + padX + (l.color ? 15 : 0)).toFixed(1)}" y="${ly.toFixed(1)}" font-size="11.5" fill="${COLORS.text}">${escapeHtml(l.label)}</text>
         <text x="${(bx + width - padX).toFixed(1)}" y="${ly.toFixed(1)}" font-size="11.5" font-weight="600" fill="#f8fafc" text-anchor="end">${escapeHtml(l.value)}</text>`;
     })
     .join("");
   return `<g class="ttp"><rect x="${(bx + 1).toFixed(1)}" y="${(by + 2).toFixed(1)}" width="${width.toFixed(1)}" height="${height}" rx="7" fill="#020617" opacity="0.35" />
     <rect x="${bx.toFixed(1)}" y="${by.toFixed(1)}" width="${width.toFixed(1)}" height="${height}" rx="7" fill="#0b1220" stroke="#334155" />
     <text x="${(bx + padX).toFixed(1)}" y="${(by + 10 + 4).toFixed(1)}" font-size="10.5" font-weight="600" letter-spacing="0.06em" fill="${COLORS.neutral}">${escapeHtml(title.toUpperCase())}</text>${rows}</g>`;
+}
+
+/**
+ * Converte o texto de tooltip já existente ("Meta Ads — leads 150, receita R$ 960,00")
+ * em linhas rótulo/valor para o balão visual. Só apresentação: o texto completo segue
+ * no <title>. Sem " — " ou sem vírgulas, devolve lista vazia.
+ */
+function tooltipRows(text: string | undefined): { label: string; value: string }[] {
+  if (!text || !text.includes(" — ")) return [];
+  const rest = text.slice(text.indexOf(" — ") + 3);
+  return rest
+    .split(", ")
+    .map((seg) => {
+      const cut = seg.lastIndexOf(" ");
+      if (cut <= 0) return null;
+      const label = seg.slice(0, cut);
+      return { label: label.charAt(0).toUpperCase() + label.slice(1), value: seg.slice(cut + 1) };
+    })
+    .filter((r): r is { label: string; value: string } => r !== null);
 }
 
 export function emptyChart(message = "Ainda não existem dados suficientes neste período."): string {
@@ -159,9 +180,9 @@ export function lineChart(opts: { series: Series[]; height?: number; ariaLabel: 
       const yy = (padT + innerH - f * innerH).toFixed(1);
       const left = primary ? primary.format(f * maxPrimary) : "";
       const right = secondarySeries ? secondarySeries.format(f * maxSecondary) : "";
-      return `<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="${COLORS.grid}" stroke-width="1" ${f === 0 ? "" : 'stroke-dasharray="2 4"'} />
+      return `<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="${f === 0 ? COLORS.axis : COLORS.grid}" stroke-width="1" />
         <text x="${padL - 10}" y="${(+yy + 4).toFixed(1)}" text-anchor="end" font-size="10.5" fill="${COLORS.neutral}">${escapeHtml(left)}</text>
-        ${secondarySeries ? `<text x="${W - padR + 10}" y="${(+yy + 4).toFixed(1)}" text-anchor="start" font-size="10.5" fill="${secondarySeries.color}" opacity="0.9">${escapeHtml(right)}</text>` : ""}`;
+        ${secondarySeries ? `<text x="${W - padR + 10}" y="${(+yy + 4).toFixed(1)}" text-anchor="start" font-size="10.5" fill="${COLORS.neutral}">${escapeHtml(right)}</text>` : ""}`;
     })
     .join("");
 
@@ -216,7 +237,7 @@ export function lineChart(opts: { series: Series[]; height?: number; ariaLabel: 
       const dots = values
         .map(
           (e) =>
-            `<circle class="dot" cx="${cx.toFixed(1)}" cy="${y(e.v as number, !!e.s.secondary).toFixed(1)}" r="3.2" fill="#0f172a" stroke="${e.s.color}" stroke-width="2"><title>${escapeHtml(`${series[0].points[i].label} — ${e.s.name}: ${e.s.format(e.v as number)}`)}</title></circle>`
+            `<circle class="dot" cx="${cx.toFixed(1)}" cy="${y(e.v as number, !!e.s.secondary).toFixed(1)}" r="3.5" fill="${e.s.color}" stroke="${COLORS.surface}" stroke-width="2"><title>${escapeHtml(`${series[0].points[i].label} — ${e.s.name}: ${e.s.format(e.v as number)}`)}</title></circle>`
         )
         .join("");
       const tip = svgTooltip(cx, topY, W, series[0].points[i].label, values.map((e) => ({ label: e.s.name, value: e.s.format(e.v as number), color: e.s.color })));
@@ -245,36 +266,60 @@ export interface BarItem {
 }
 
 /** Barras horizontais — comparação entre campanhas/canais. Valores null viram "—". */
-export function barChart(opts: { items: BarItem[]; format: (v: number) => string; ariaLabel: string }): string {
+export function barChart(opts: { items: BarItem[]; format: (v: number) => string; ariaLabel: string; valueLabel?: string }): string {
   const items = opts.items.filter((i) => i.value !== null && i.value !== undefined);
   if (items.length === 0) return emptyChart();
-  const max = Math.max(...items.map((i) => i.value as number), 0) || 1;
-  // Largura menor que a do gráfico de linha: este gráfico costuma viver em meia coluna,
-  // e o SVG escala com o container — assim o texto continua legível.
-  const rowH = 30;
+  // Colunas verticais finas (máx. 40 unidades) sobre uma única linha-base, topo arredondado,
+  // valor no topo, categoria embaixo; grid em linhas finas sólidas. O SVG escala com o container.
   const W = 600;
-  const labelW = 170;
-  const valueW = 100;
-  const trackW = W - labelW - valueW;
-  const H = items.length * rowH + 8;
-  const rows = items
+  const H = 236;
+  const padL = 78;
+  const padR = 16;
+  const padT = 30;
+  const padB = 36;
+  const innerW = W - padL - padR;
+  const innerH = H - padT - padB;
+  const baseY = padT + innerH;
+  const max = niceMax(Math.max(...items.map((i) => i.value as number), 0));
+  const slot = innerW / items.length;
+  const barW = Math.max(14, Math.min(40, slot * 0.45));
+  const y = (v: number) => baseY - (Math.max(0, v) / max) * innerH;
+  const grid =
+    [0.25, 0.5, 0.75, 1]
+      .map((f) => {
+        const yy = (baseY - f * innerH).toFixed(1);
+        return `<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="${COLORS.grid}" stroke-width="1" />
+        <text x="${padL - 10}" y="${(+yy + 4).toFixed(1)}" text-anchor="end" font-size="10.5" fill="${COLORS.neutral}">${escapeHtml(opts.format(f * max))}</text>`;
+      })
+      .join("") +
+    `<line x1="${padL}" x2="${W - padR}" y1="${baseY}" y2="${baseY}" stroke="${COLORS.axis}" stroke-width="1" />
+    <text x="${padL - 10}" y="${baseY + 4}" text-anchor="end" font-size="10.5" fill="${COLORS.neutral}">${escapeHtml(opts.format(0))}</text>`;
+  const maxChars = Math.max(6, Math.floor(slot / 6.4));
+  const cols = items
     .map((it, idx) => {
       const v = it.value as number;
-      const w = Math.max(3, (v / max) * trackW);
-      const yy = idx * rowH + 4;
-      const color = it.color ?? COLORS.accent;
-      // Trilha discreta atrás da barra (comparação visual entre linhas) + barra arredondada com hover.
+      const cx = padL + slot * idx + slot / 2;
+      const x0 = cx - barW / 2;
+      const top = y(v);
+      const h = baseY - top;
+      const r = Math.min(4, barW / 2, h / 2);
+      const bar =
+        h > 0
+          ? `<path class="bar" d="M${x0.toFixed(1)},${baseY} V${(top + r).toFixed(1)} Q${x0.toFixed(1)},${top.toFixed(1)} ${(x0 + r).toFixed(1)},${top.toFixed(1)} H${(x0 + barW - r).toFixed(1)} Q${(x0 + barW).toFixed(1)},${top.toFixed(1)} ${(x0 + barW).toFixed(1)},${(top + r).toFixed(1)} V${baseY} Z" fill="${it.color ?? COLORS.accent}" opacity="0.85" />`
+          : "";
+      const label = it.label.length > maxChars ? it.label.slice(0, maxChars - 1) + "…" : it.label;
+      const rows = [{ label: opts.valueLabel ?? "Valor", value: opts.format(v) }, ...tooltipRows(it.tooltip).filter((r) => r.label.toLowerCase() !== (opts.valueLabel ?? "").toLowerCase())];
       return `<g class="pt bar-g">
         <title>${escapeHtml(it.tooltip ?? `${it.label}: ${opts.format(v)}`)}</title>
-        <rect x="0" y="${yy}" width="${W}" height="${rowH - 2}" fill="transparent" />
-        <text x="${labelW - 12}" y="${yy + 18}" text-anchor="end" font-size="12" fill="${COLORS.text}">${escapeHtml(it.label.length > 24 ? it.label.slice(0, 23) + "…" : it.label)}</text>
-        <rect x="${labelW}" y="${yy + 6}" width="${trackW}" height="${rowH - 14}" rx="4" fill="${COLORS.grid}" opacity="0.6" />
-        <rect class="bar" x="${labelW}" y="${yy + 6}" width="${w.toFixed(1)}" height="${rowH - 14}" rx="4" fill="${color}" opacity="0.8" />
-        <text x="${(labelW + w + 10).toFixed(1)}" y="${yy + 18}" font-size="12" font-weight="600" fill="#f8fafc">${escapeHtml(opts.format(v))}</text>
+        <rect x="${(padL + slot * idx).toFixed(1)}" y="${padT - 20}" width="${slot.toFixed(1)}" height="${innerH + 20 + padB}" fill="transparent" />
+        ${bar}
+        <text x="${cx.toFixed(1)}" y="${(top - 8).toFixed(1)}" text-anchor="middle" font-size="12" font-weight="600" fill="#f8fafc">${escapeHtml(opts.format(v))}</text>
+        <text x="${cx.toFixed(1)}" y="${baseY + 20}" text-anchor="middle" font-size="11" fill="${COLORS.neutral}">${escapeHtml(label)}</text>
+        ${svgTooltip(cx, top, W, it.label, rows)}
       </g>`;
     })
     .join("");
-  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtml(opts.ariaLabel)}" class="chart-svg" style="max-height:${H}px">${rows}</svg></div>`;
+  return `<div class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtml(opts.ariaLabel)}" class="chart-svg chart-bars">${grid}${cols}</svg></div>`;
 }
 
 export interface FunnelStep {
@@ -290,29 +335,41 @@ export function funnelChart(steps: FunnelStep[]): string {
   const valid = steps.filter((s) => s.value !== null && s.value !== undefined);
   if (valid.length === 0 || valid.every((s) => (s.value as number) === 0)) return emptyChart("Sem eventos no funil para este período.");
   const first = (steps.find((s) => s.value !== null && s.value !== undefined)?.value as number) || 0;
+  const maxVal = Math.max(...valid.map((s) => s.value as number));
+  const n = steps.length;
   let prev: number | null = null;
+  // Blocos centralizados; rótulo e valor à esquerda, conversão/acumulada/perda à direita; tom da barra
+  // escurece etapa a etapa (escala ordinal, uma cor). A LARGURA usa escala logarítmica — do anúncio à
+  // venda os volumes variam 5 ordens de grandeza e, em escala linear, tudo abaixo do topo vira um risco.
+  // A escala é declarada na nota do componente; os números e taxas ao lado são os valores reais.
   const rows = steps
-    .map((s) => {
+    .map((s, idx) => {
       const v = s.value;
-      const widthPct = v === null || v === undefined || first === 0 ? 0 : Math.max(6, (v / first) * 100);
-      const pct = (n: number) => (n < 0.1 ? `${(n * 100).toFixed(1)}%` : `${(n * 100).toFixed(0)}%`).replace(".", ",");
+      const has = v !== null && v !== undefined;
+      const widthPct = !has || (v as number) <= 0 || maxVal <= 0 ? 0 : Math.max(5, (Math.log10((v as number) + 1) / Math.log10(maxVal + 1)) * 100);
+      const pct = (x: number) => (x < 0.1 ? `${(x * 100).toFixed(1)}%` : `${(x * 100).toFixed(0)}%`).replace(".", ",");
       // Etapas nem sempre são estritamente aninhadas (ex.: lead criado à mão no CRM sem conversa):
       // quando a etapa é MAIOR que a anterior, não existe "conversão" nem "perda" a mostrar.
-      const nested = v !== null && v !== undefined && prev !== null && prev > 0 && v <= prev;
+      const nested = has && prev !== null && prev > 0 && (v as number) <= prev;
       const stepConv = nested ? pct((v as number) / (prev as number)) : "—";
-      const cumConv = v !== null && v !== undefined && first > 0 && v <= first ? pct(v / first) : "—";
+      const cumConv = has && first > 0 && (v as number) <= first ? pct((v as number) / first) : "—";
       const loss = nested && (v as number) < (prev as number) ? `${pct(((prev as number) - (v as number)) / (prev as number))} perdidos` : "";
-      if (v !== null && v !== undefined) prev = v;
-      const valueLabel = v === null || v === undefined ? "—" : v.toLocaleString("pt-BR");
-      const inner = `<div class="funnel-bar" style="width:${widthPct}%"></div>
-        <div class="funnel-text"><strong>${escapeHtml(valueLabel)}</strong> ${escapeHtml(s.label)}${s.costLabel ? ` <span class="meta">· ${escapeHtml(s.costLabel)}</span>` : ""}</div>`;
-      return `<div class="funnel-row">
-        ${s.href ? `<a href="${escapeHtml(s.href)}" class="funnel-link">${inner}</a>` : `<div>${inner}</div>`}
-        <div class="funnel-conv"><span title="Conversão da etapa anterior para esta">${stepConv}</span> <span class="meta" title="Conversão acumulada desde a primeira etapa">(${cumConv} acum.)</span> ${loss ? `<span class="funnel-loss">${escapeHtml(loss)}</span>` : ""}</div>
-      </div>`;
+      if (has) prev = v as number;
+      const valueLabel = has ? (v as number).toLocaleString("pt-BR") : "—";
+      const alpha = n > 1 ? 0.35 + 0.55 * (idx / (n - 1)) : 0.7;
+      const tip = `<div class="funnel-tip" aria-hidden="true"><div class="tip-title">${escapeHtml(s.label)}</div>
+          <div class="tip-row"><span>Quantidade</span><strong>${escapeHtml(valueLabel)}</strong></div>
+          <div class="tip-row"><span>Conversão da etapa anterior</span><strong>${stepConv}</strong></div>
+          <div class="tip-row"><span>Acumulada desde a 1ª etapa</span><strong>${cumConv}</strong></div>
+          ${loss ? `<div class="tip-row"><span>Perda</span><strong>${escapeHtml(loss)}</strong></div>` : ""}
+          ${s.costLabel ? `<div class="tip-row"><span>Custo</span><strong>${escapeHtml(s.costLabel)}</strong></div>` : ""}</div>`;
+      const inner = `<div class="funnel-stage"><span class="funnel-name">${escapeHtml(s.label)}</span><span class="funnel-value">${escapeHtml(valueLabel)}</span>${s.costLabel ? `<span class="funnel-cost">${escapeHtml(s.costLabel)}</span>` : ""}</div>
+        <div class="funnel-track">${has ? `<div class="funnel-bar" style="width:${widthPct.toFixed(1)}%;opacity:${alpha.toFixed(2)}"></div>` : ""}${tip}</div>
+        <div class="funnel-conv"><span class="funnel-rate" title="Conversão da etapa anterior para esta">${stepConv}</span><span class="funnel-cum" title="Conversão acumulada desde a primeira etapa">${cumConv} acum.</span>${loss ? `<span class="funnel-loss">${escapeHtml(loss)}</span>` : ""}</div>`;
+      return s.href ? `<a href="${escapeHtml(s.href)}" class="funnel-row funnel-link">${inner}</a>` : `<div class="funnel-row">${inner}</div>`;
     })
     .join("");
-  return `<div class="funnel">${rows}</div>`;
+  return `<div class="funnel">${rows}<div class="funnel-note">Largura das barras em escala logarítmica (para caber do anúncio à venda no mesmo desenho) — as taxas ao lado são os valores reais.</div></div>`;
 }
 
 /** Mini linha (sparkline) para os cards executivos. Sem eixos. */
@@ -365,7 +422,7 @@ export function bubbleChart(points: BubblePoint[], formatX: (v: number) => strin
     .map((f) => {
       const yy = (padT + innerH - f * innerH).toFixed(1);
       const xx = (padL + f * innerW).toFixed(1);
-      return `<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="${COLORS.grid}" ${f === 0 ? "" : 'stroke-dasharray="2 4"'} />
+      return `<line x1="${padL}" x2="${W - padR}" y1="${yy}" y2="${yy}" stroke="${f === 0 ? COLORS.axis : COLORS.grid}" stroke-width="1" />
         <text x="${padL - 10}" y="${(+yy + 4).toFixed(1)}" text-anchor="end" font-size="10.5" fill="${COLORS.neutral}">${(f * maxY * 100).toFixed(0)}%</text>
         <text x="${xx}" y="${H - 14}" text-anchor="middle" font-size="10.5" fill="${COLORS.neutral}">${escapeHtml(formatX(f * maxX))}</text>`;
     })
@@ -377,11 +434,9 @@ export function bubbleChart(points: BubblePoint[], formatX: (v: number) => strin
       const r = 7 + Math.sqrt(p.size / maxSize) * 24;
       const color = p.color ?? COLORS.accent;
       // O texto do tooltip é o mesmo de antes (uma linha); só ganha o balão visual no hover.
-      const [tipTitle, tipRest] = p.tooltip.includes(" — ") ? [p.tooltip.slice(0, p.tooltip.indexOf(" — ")), p.tooltip.slice(p.tooltip.indexOf(" — ") + 3)] : [p.label, p.tooltip];
-      const tipLines = tipRest.split(", ").map((seg) => {
-        const cut = seg.lastIndexOf(" ");
-        return cut > 0 ? { label: seg.slice(0, cut), value: seg.slice(cut + 1) } : { label: seg, value: "" };
-      });
+      const tipTitle = p.tooltip.includes(" — ") ? p.tooltip.slice(0, p.tooltip.indexOf(" — ")) : p.label;
+      const parsed = tooltipRows(p.tooltip);
+      const tipLines = parsed.length ? parsed : [{ label: "Detalhes", value: p.tooltip }];
       return `<g class="pt"><circle class="dot" cx="${cx.toFixed(1)}" cy="${cy.toFixed(1)}" r="${r.toFixed(1)}" fill="${color}" opacity="0.5" stroke="${color}" stroke-width="1.5"><title>${escapeHtml(p.tooltip)}</title></circle>
         <text x="${cx.toFixed(1)}" y="${(cy - r - 6).toFixed(1)}" text-anchor="middle" font-size="11" font-weight="500" fill="${COLORS.text}">${escapeHtml(p.label.length > 22 ? p.label.slice(0, 21) + "…" : p.label)}</text>
         ${svgTooltip(cx, cy - r, W, tipTitle, tipLines)}</g>`;
@@ -391,4 +446,67 @@ export function bubbleChart(points: BubblePoint[], formatX: (v: number) => strin
     <div class="chart-legend"><span class="meta">Eixo X: CPL (menor é melhor) · Eixo Y: taxa de fechamento (maior é melhor) · Tamanho: investimento</span></div>
     <svg viewBox="0 0 ${W} ${H}" role="img" aria-label="Custo por lead versus taxa de fechamento por campanha" class="chart-svg">${grid}${circles}</svg>
   </div>`;
+}
+
+export interface GaugeBand {
+  /** Limite superior exclusivo da faixa (a última usa o máximo). */
+  upTo: number;
+  color: string;
+  label: string;
+}
+
+/**
+ * Gauge semicircular: arco de trilha + arco preenchido na cor do estado, faixas de
+ * desempenho discretas por fora (limites vêm de quem chama — nunca inventados aqui),
+ * valor grande no centro. `value` null → sem preenchimento e "—".
+ */
+export function gaugeChart(opts: { value: number | null; max?: number; color: string; statusLabel: string; bands?: GaugeBand[]; ariaLabel: string }): string {
+  const max = opts.max ?? 100;
+  const W = 260;
+  const H = 156;
+  const cx = 130;
+  const cy = 132;
+  const r = 92;
+  const stroke = 14;
+  const f = (v: number) => v.toFixed(2);
+  const point = (frac: number, radius: number) => {
+    const a = Math.PI * (1 - Math.min(1, Math.max(0, frac)));
+    return { x: cx + radius * Math.cos(a), y: cy - radius * Math.sin(a) };
+  };
+  const arc = (from: number, to: number, radius: number) => {
+    const p0 = point(from, radius);
+    const p1 = point(to, radius);
+    const large = to - from > 0.5 ? 1 : 0;
+    return `M${f(p0.x)},${f(p0.y)} A${radius},${radius} 0 ${large} 1 ${f(p1.x)},${f(p1.y)}`;
+  };
+  const frac = opts.value === null ? 0 : Math.min(1, Math.max(0, opts.value / max));
+  const track = `<path d="${arc(0, 1, r)}" fill="none" stroke="${COLORS.grid}" stroke-width="${stroke}" stroke-linecap="round" />`;
+  const fill = frac > 0 ? `<path d="${arc(0, frac, r)}" fill="none" stroke="${opts.color}" stroke-width="${stroke}" stroke-linecap="round" />` : "";
+  let bandsSvg = "";
+  if (opts.bands && opts.bands.length) {
+    let start = 0;
+    bandsSvg = opts.bands
+      .map((b, i) => {
+        const end = i === opts.bands!.length - 1 ? max : b.upTo;
+        const seg = `<path d="${arc(start / max, end / max, r + 15)}" fill="none" stroke="${b.color}" stroke-width="3" opacity="0.45" />`;
+        const tick =
+          i < opts.bands!.length - 1
+            ? `<text x="${f(point(end / max, r + 26).x)}" y="${f(point(end / max, r + 26).y + 3)}" text-anchor="middle" font-size="10" fill="${COLORS.neutral}">${end}</text>`
+            : "";
+        start = end;
+        return seg + tick;
+      })
+      .join("");
+  }
+  const valueText = opts.value === null ? "—" : String(Math.round(opts.value));
+  const tip = svgTooltip(cx, cy - r - stroke, W, "Índice", [
+    { label: "Valor", value: opts.value === null ? "—" : `${Math.round(opts.value)} / ${max}` },
+    { label: "Estado", value: opts.statusLabel, color: opts.color },
+  ]);
+  return `<div class="gauge"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${escapeHtml(opts.ariaLabel)}" class="chart-svg gauge-svg">
+    ${bandsSvg}
+    <g class="pt"><rect x="0" y="0" width="${W}" height="${H}" fill="transparent" />${track}${fill}
+      <text x="${cx}" y="${cy - 14}" text-anchor="middle" font-size="40" font-weight="600" letter-spacing="-0.03em" fill="#f8fafc">${escapeHtml(valueText)}</text>
+      <text x="${cx}" y="${cy + 8}" text-anchor="middle" font-size="11.5" fill="${COLORS.neutral}">de ${max}</text>${tip}</g>
+  </svg></div>`;
 }

@@ -503,6 +503,9 @@ export function stalledOpportunities(scored: ScoredLead[], hours = { qualifiedNo
 
 export type Semaphore = "VERDE" | "AMARELO" | "VERMELHO" | "CINZA";
 
+/** Limites do semáforo da saúde (0–100): abaixo de AMARELO é vermelho; a partir de VERDE é verde. Usados no cálculo e nas faixas do gauge. */
+export const HEALTH_THRESHOLDS = { AMARELO: 40, VERDE: 70 } as const;
+
 export interface HealthScore {
   score: number | null;
   semaphore: Semaphore;
@@ -562,7 +565,7 @@ export async function healthScore(companyId: number, bi: CompanyBi, goals: Compa
   const score = Math.round(valid.reduce((s, c) => s + (c.score as number) * c.weight, 0) / totalWeight);
   const broken = accounts.some((a) => a.connection_status === "RECONEXAO_NECESSARIA" || a.connection_status === "ERRO" || a.connection_status === "EXPIRADA");
   if (broken) reasons.push("Há integração com erro ou precisando de reconexão.");
-  const semaphore: Semaphore = broken || score < 40 ? "VERMELHO" : score < 70 ? "AMARELO" : "VERDE";
+  const semaphore: Semaphore = broken || score < HEALTH_THRESHOLDS.AMARELO ? "VERMELHO" : score < HEALTH_THRESHOLDS.VERDE ? "AMARELO" : "VERDE";
   return { score, semaphore, components, reasons };
 }
 

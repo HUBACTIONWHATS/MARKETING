@@ -98,7 +98,12 @@ const BASE_STYLE = `
   .layout { display: flex; min-height: 100vh; }
   .sidebar { width: 232px; background: var(--bg-primary); border-right: 1px solid var(--border); padding: var(--s5) var(--s3); flex-shrink: 0; display: flex; flex-direction: column; gap: var(--s2); }
   .sidebar .brand { display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 700; letter-spacing: 0.06em; padding: var(--s1) var(--s2) var(--s4); color: var(--text-primary); line-height: 1.2; }
-  .sidebar .brand .mark { width: 28px; height: 28px; border-radius: 7px; background: var(--accent); display: inline-flex; align-items: center; justify-content: center; color: #0b1220; font-size: 13px; font-weight: 800; flex-shrink: 0; letter-spacing: 0; }
+  .sidebar .brand .mark { width: 34px; height: 28px; display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .sidebar .brand .mark svg, .login-brand .mark svg { width: 100%; height: 100%; display: block; }
+  .login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: var(--s5); }
+  .login-brand .mark { width: 44px; height: 36px; flex-shrink: 0; }
+  .login-brand strong { display: block; font-size: 15px; letter-spacing: 0.06em; }
+  .login-brand small { display: block; font-size: 11px; color: var(--text-muted); letter-spacing: 0.04em; text-transform: uppercase; }
   .sidebar .brand small { display: block; font-weight: 500; letter-spacing: 0; color: var(--text-muted); font-size: 11px; margin-top: 2px; }
   .sidebar nav a {
     display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--radius-sm); color: var(--text-secondary); text-decoration: none;
@@ -242,16 +247,33 @@ const BASE_STYLE = `
   .chart-svg .pt:hover .dot { r: 5; }
   .chart-svg .bar-g .bar { transition: opacity var(--t); } .chart-svg .bar-g:hover .bar { opacity: 1; }
   .sparkline { display: block; }
-  .funnel { display: flex; flex-direction: column; gap: 6px; }
-  .funnel-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--s3); align-items: center; }
-  .funnel-link, .funnel-row > div:first-child { position: relative; display: block; text-decoration: none; color: inherit; min-width: 0; background: rgba(148,163,184,0.06); border-radius: 6px; overflow: hidden; }
-  .funnel-bar { height: 38px; background: rgba(56,189,248,0.22); border-right: 2px solid rgba(56,189,248,0.6); border-radius: 6px 0 0 6px; min-width: 6%; transition: background var(--t); }
-  .funnel-row:hover .funnel-bar { background: rgba(56,189,248,0.32); }
-  .funnel-text { position: absolute; left: 12px; right: 8px; top: 0; height: 38px; display: flex; align-items: center; gap: 6px; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .funnel-text strong { font-size: 14px; font-variant-numeric: tabular-nums; }
-  .funnel-conv { font-size: 12px; color: var(--text-secondary); font-variant-numeric: tabular-nums; display: flex; flex-direction: column; align-items: flex-end; gap: 2px; min-width: 96px; text-align: right; }
-  .funnel-conv > span:first-child { font-weight: 600; color: var(--text-primary); font-size: 13px; }
+  .funnel { display: flex; flex-direction: column; gap: 2px; }
+  .funnel-row { display: grid; grid-template-columns: minmax(128px, 0.8fr) minmax(0, 2.2fr) minmax(112px, auto); gap: var(--s4); align-items: center; padding: 7px 10px; border-radius: var(--radius-sm); text-decoration: none; color: inherit; transition: background var(--t); }
+  .funnel-row:hover { background: rgba(148,163,184,0.05); }
+  .funnel-stage { display: flex; flex-direction: column; min-width: 0; line-height: 1.25; }
+  .funnel-name { font-size: 12.5px; color: var(--text-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .funnel-value { font-size: 16px; font-weight: 600; color: var(--text-primary); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+  .funnel-cost { font-size: 11.5px; color: var(--text-faint); white-space: nowrap; }
+  .funnel-track { position: relative; display: flex; justify-content: center; align-items: center; min-height: 30px; }
+  .funnel-bar { height: 28px; border-radius: 6px; background: var(--accent); transition: filter var(--t); }
+  .funnel-row:hover .funnel-bar { filter: brightness(1.15); }
+  .funnel-conv { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; text-align: right; font-variant-numeric: tabular-nums; }
+  .funnel-rate { font-size: 13.5px; font-weight: 600; color: var(--text-primary); }
+  .funnel-cum { font-size: 11.5px; color: var(--text-muted); }
   .funnel-loss { color: var(--warning); font-size: 11px; background: var(--warning-soft); padding: 2px 7px; border-radius: var(--r-pill); }
+  .funnel-note { font-size: 11px; color: var(--text-faint); margin: 8px 10px 0; }
+  .funnel-tip { position: absolute; left: 50%; bottom: calc(100% + 8px); transform: translateX(-50%); z-index: 40; min-width: 250px; background: #0b1220; border: 1px solid var(--border-strong); border-radius: 7px; padding: 10px 12px; box-shadow: 0 6px 16px rgba(2,6,23,0.4); opacity: 0; pointer-events: none; transition: opacity var(--t); }
+  .funnel-row:nth-child(-n+2) .funnel-tip { bottom: auto; top: calc(100% + 8px); }
+  .funnel-row:hover .funnel-tip, .funnel-row:focus-visible .funnel-tip { opacity: 1; }
+  .funnel-tip .tip-title { font-size: 10.5px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px; }
+  .funnel-tip .tip-row { display: flex; justify-content: space-between; gap: 16px; font-size: 12px; color: var(--text-secondary); line-height: 1.55; white-space: nowrap; }
+  .funnel-tip .tip-row strong { color: #f8fafc; font-weight: 600; font-variant-numeric: tabular-nums; }
+  .gauge { display: flex; justify-content: center; }
+  .gauge-svg { max-width: 300px; }
+  .gauge-status { display: flex; justify-content: center; margin: 2px 0 10px; }
+  .gauge-legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px 14px; font-size: 11.5px; color: var(--text-muted); margin-bottom: var(--s3); }
+  .gauge-legend span { display: inline-flex; align-items: center; gap: 6px; } .gauge-legend i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+  .chart-head.compact { margin-bottom: var(--s2); } .chart-head.compact h3 { font-size: 13px; }
 
   /* ---------- Tabelas ---------- */
   .data-table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius-md); background: var(--surface-2); }
@@ -346,7 +368,7 @@ const BASE_STYLE = `
     .metrics-grid, .kpi-grid, .col-8 .kpi-grid, .col-7 .kpi-grid, .col-6 .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .provider-compare { grid-template-columns: 1fr; }
     .goal-row { grid-template-columns: 1fr 1fr 1fr; }
-    .funnel-row { grid-template-columns: 1fr; gap: 2px; }
+    .funnel-row { grid-template-columns: 1fr auto; gap: 6px var(--s3); } .funnel-track { order: 3; grid-column: 1 / -1; }
     .attention-list li { grid-template-columns: 1fr; }
     .grid-2 { grid-template-columns: 1fr; }
   }
@@ -387,7 +409,8 @@ export function loginPage(error?: string): string {
     "Login — HUB ACTION",
     `<div class="center-screen">
       <div class="card">
-        <h1>HUB ACTION — CRM WhatsApp</h1>
+        <div class="login-brand"><span class="mark">${BRAND_MARK}</span><div><strong>HUB ACTION</strong><small>Marketing que gera crescimento.</small></div></div>
+        <h1>CRM WhatsApp — entrar</h1>
         ${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
         <form method="post" action="/login">
           <label>E-mail
@@ -819,6 +842,8 @@ const ROLE_LABEL: Record<Role, string> = {
 /** Ícones discretos do menu (SVG inline, 16px, traço 1.75) — só visual. */
 const svgIcon = (paths: string) =>
   `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+/** Marca inspirada na logo da Hub Action (H inclinado azul + seta laranja). Traços planos, sem brilho. */
+const BRAND_MARK = `<svg viewBox="0 0 40 32" aria-hidden="true"><path d="M3 9l8-5v18l-8 5z" fill="#3b7ddd"/><path d="M15 11l8-5v18l-8 5z" fill="#1f4fa8"/><path d="M11 17l4-3v5l-4 3z" fill="#2c66c4"/><path d="M26 6l12 9-12 9z" fill="#f26a1b"/></svg>`;
 const NAV_ICONS: Record<string, string> = {
   dashboard: svgIcon('<rect x="3" y="3" width="7" height="9" rx="1.5"/><rect x="14" y="3" width="7" height="5" rx="1.5"/><rect x="14" y="12" width="7" height="9" rx="1.5"/><rect x="3" y="16" width="7" height="5" rx="1.5"/>'),
   conversas: svgIcon('<path d="M21 12a8 8 0 0 1-11.6 7.1L4 20l1-4.6A8 8 0 1 1 21 12z"/>'),
@@ -856,7 +881,7 @@ export function appShell(opts: {
     `${opts.company.name} — HUB ACTION`,
     `${demoBanner}<div class="layout">
       <aside class="sidebar">
-        <div class="brand"><span class="mark">H</span><span>HUB ACTION<small>CRM · Command Center</small></span></div>
+        <div class="brand"><span class="mark">${BRAND_MARK}</span><span>HUB ACTION<small>CRM · Command Center</small></span></div>
         <nav aria-label="Navegação principal">${nav}</nav>
       </aside>
       <div class="main">
