@@ -650,3 +650,30 @@ Tokens OAuth cifrados com `CREDENTIAL_ENCRYPTION_KEY`, nunca devolvidos a views 
 - Sender do feedback de conversão (Meta CAPI / Google offline conversions): arquitetura pronta, envio não implementado.
 - Sincronização contínua exige plano pago no Render (instância não pode dormir).
 - Sem lint configurado no projeto (só `tsc --strict`).
+
+## Etapa concluída: Etapa 16 — Front-end visual V2 (sem mudar o funcionamento)
+
+Pedido: evolução visual profunda do painel ao nível de SaaS premium, com a regra de ouro **não alterar o funcionamento** (backend, rotas, permissões, filtros, cálculos, dados). Restrições adicionais do usuário, respeitadas: `server.ts` intocado; nenhuma funcionalidade, botão, página, filtro ou permissão nova; `charts.ts` alterado por edições localizadas (mesmos exports, assinaturas e dados); arquitetura mantida (HTML server-side + CSS + TypeScript + SVG manual); sem "efeito de IA" (sem glow, vidro, gradientes fortes, sombras grandes).
+
+### Auditoria visual (antes de mudar)
+
+Sem biblioteca de gráficos nem JS no navegador (gráficos SVG em [src/charts.ts](src/charts.ts)); todo o CSS vivia num único bloco `BASE_STYLE` em [src/views.ts](src/views.ts) misturando `rem` sem escala, cores repetidas em hexadecimal, cards iguais para tudo, tabelas sem hierarquia, sidebar só texto, gráfico "linha dentro de um card" (polyline reta, grid sólido, `<title>` como único tooltip, texto do gráfico de barras minúsculo em meia coluna), funil com colunas fixas que sobrepunham texto em telas ≤ 1366 px, sem `focus-visible`, sem `prefers-reduced-motion`.
+
+### O que mudou (só camada visual)
+
+- **Design system** (`BASE_STYLE`): tokens `--bg-primary/--bg-secondary/--surface/--surface-hover/--border/--text-primary/--text-secondary/--text-muted/--accent/--success/--warning/--danger/--meta/--google`, `--radius-sm/md/lg`, escala de espaçamento 4/8/12/16/20/24/32, tipografia 11/12/13/14/20/26 com números tabulares; aliases dos nomes antigos mantidos; **nenhuma classe existente foi removida** (inventário conferido).
+- **Shell**: sidebar com grupos "Operação"/"Performance", ícones SVG lineares (16 px, mesmo traço), item ativo discreto com barra lateral, `aria-current`; topbar fixa; botão "Sair" secundário.
+- **Dashboard operacional**: cabeçalho com eyebrow/título/período, filtros em barra, seções com título-régua, cards de métrica com rótulo em caixa alta + tooltip explicativo (`.tip`) + valor 27 px + legenda completa, meta de SLA em card próprio. Mesmos números, mesmos filtros, mesmo formulário.
+- **KPIs do Command Center**: seta em "chip", variação e "vs período anterior" em hierarquia própria, sparkline suave com área sutil; cards secundários mais compactos. Só usa `current/previous/spark` que já existiam.
+- **Gráficos** ([src/charts.ts](src/charts.ts), API idêntica): curva monotone cúbica (passa exatamente pelos pontos, sem inventar valores), área com gradiente muito sutil só na série principal, grid tracejado discreto com linha-base sólida, eixo secundário identificado pela cor, rótulos do eixo X sem sobreposição no fim, pontos com halo, **tooltip visual em SVG** mostrado por CSS no hover (`.pt:hover .ttp`) com título DATA + linhas "métrica … valor" alinhadas, fundo sólido, borda discreta, sombra leve, sempre dentro do gráfico — os `<title>` nativos continuam (acessibilidade); barras arredondadas com trilha e hover; funil com trilha, conversão/acumulada/perda em coluna própria (não quebra mais em coluna estreita); bolhas com folga de eixo para não cortar a maior bolha; estado vazio com ícone.
+- **Gráfico principal**: cabeçalho próprio (título, subtítulo com período e métricas comparadas), o mesmo formulário de seleção de métricas e altura 300.
+- **Tabelas**: cabeçalho fixo em caixa alta, zebra por hover, números tabulares alinhados à direita, `hours-table` alinhada ao mesmo padrão. **Formulários**: inputs/selects com foco visível, seta própria no select, botões com estados.
+- **Badges/chips/severidade/semáforo** com fundo suave por significado (verde/âmbar/vermelho/azul, Meta violeta, Google laranja).
+- **Responsividade**: desktop primeiro (1920/1440/1366/1280 sem cards gigantes); ≤ 960 px → 2 colunas e blocos empilhados; ≤ 720 px → sidebar horizontal; ≤ 480 px → 1 coluna.
+- **Acessibilidade/microinterações**: `focus-visible` em tudo, `prefers-reduced-motion`, transições de 140 ms só em cor/borda, tooltips também no foco do teclado.
+
+### Verificado
+
+- `npx tsc --noEmit` limpo · `npm run build` ok · **117/117 testes em SQLite e 117/117 em Postgres local**.
+- Servidor descartável em SQLite (`.env` renomeado durante toda a vida do processo, `/health` = `sqlite`) com dados de demonstração: capturas em **1440 px e 1280 px** (Chrome headless) de login, dashboard, visão geral, campanhas, funil, resultados, inteligência, alertas, conversas, detalhe da conversa, CRM, configurações, relatórios e toda a área `/admin/*`; tooltip de hover dos gráficos implementado só com CSS (`.pt:hover .ttp`) e conferido no DOM (regra presente, grupos `.pt` com tooltip gerados para cada ponto); o navegador embutido do app não renderizou o estado de hover de forma confiável, então a conferência visual do tooltip fica a cargo do teste manual no deploy. Três defeitos visuais encontrados e corrigidos: funil sobrepondo texto em coluna estreita, rótulos "12/09 13/09" colados no eixo X, bolha/rótulo cortados na borda do gráfico de qualidade.
+- Sem mudanças em `server.ts`, banco, migrações, rotas, autenticação, permissões, cálculos ou textos de dados; `git diff` limitado a `src/views.ts`, `src/charts.ts`, `src/viewsMarketing.ts` e este arquivo.

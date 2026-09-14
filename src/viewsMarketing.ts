@@ -90,7 +90,7 @@ export function kpiCard(opts: {
     const bad = opts.lowerIsBetter ? up : down;
     const cls = `kpi-delta ${up ? "up" : down ? "down" : ""} ${good ? "good" : ""} ${bad ? "bad" : ""}`;
     const arrow = up ? "↑" : down ? "↓" : "→";
-    deltaHtml = `<div class="${cls}">${arrow} ${fmtDelta(d)} <span class="muted">vs ${escapeHtml(opts.previousLabel)}</span></div>`;
+    deltaHtml = `<div class="${cls}"><span class="arrow" aria-hidden="true">${arrow}</span><span>${fmtDelta(d)}</span> <span class="vs">vs ${escapeHtml(opts.previousLabel)}</span></div>`;
   }
   return `<div class="kpi ${opts.secondary ? "kpi-secondary" : ""}">
     <div class="kpi-label">${tip(opts.label, opts.tooltip)}</div>
@@ -263,15 +263,18 @@ export function performanceChart(bi: CompanyBi, basePath: string, qs: string, m1
     })
     .join("");
   const series = [s1, s2].filter((s): s is Series => !!s);
+  // Cabeçalho próprio do gráfico principal: título, subtítulo (período/comparação) e o mesmo formulário de métricas de sempre.
+  const sub = `${bi.period.label} · diário${s2 ? ` · ${escapeHtml(s1?.name ?? "")} x ${escapeHtml(s2.name)}` : ""}`;
   return `<div class="card-block">
-    <h3>Performance no período
+    <div class="chart-head">
+      <div><h3>Performance no período</h3><div class="sub">${sub}</div></div>
       <form method="get" action="${basePath}" class="actions">${hidden}
-        <select name="m1" style="width:auto">${options(m1, false)}</select>
-        <select name="m2" style="width:auto">${options(m2, true)}</select>
+        <select name="m1" style="width:auto" aria-label="Métrica principal">${options(m1, false)}</select>
+        <select name="m2" style="width:auto" aria-label="Métrica de comparação">${options(m2, true)}</select>
         <button type="submit" class="btn btn-small">Comparar</button>
       </form>
-    </h3>
-    ${lineChart({ series, ariaLabel: `Evolução diária de ${series.map((s) => s.name).join(" e ")}` })}
+    </div>
+    ${lineChart({ series, height: 300, ariaLabel: `Evolução diária de ${series.map((s) => s.name).join(" e ")}` })}
   </div>`;
 }
 
