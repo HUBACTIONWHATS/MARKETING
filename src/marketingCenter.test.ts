@@ -372,3 +372,62 @@ test("isolamento multiempresa: campanha, grupos e métricas da empresa A não ap
   assert.equal(biB.providers.find((p) => p.provider === "META")!.connected, false, "a conta da A não conta como conectada para a B");
   assert.equal(biB.current.platform.hasSpendData, false);
 });
+
+// --- v3: dashboard consolidado, metas, criativos, filtros por objetivo/conta -----------------
+
+test("v3: filtros por objetivo e conta viram um conjunto de campanhas; criativos com leads atribuídos por anúncio; heatmap por dia × hora", async () => {
+  const companyId = await makeCompany("V3");
+  const meta = await makeAccount(companyId, "META");
+  const google = await makeAccount(companyId, "GOOGLE");
+  const cm = await makeCampaign(companyId, meta, "META", "Mensagens", 1000, 5);
+  await Dbm.db.run("UPDATE marketing_campaigns SET objective = 'OUTCOME_LEADS' WHERE id = ?", cm.id);
+  const cg = await makeCampaign(companyId, google, "GOOGLE", "Busca", 2000, 5);
+  await Dbm.db.run("UPDATE marketing_campaigns SET objective = 'SEARCH' WHERE id = ?", cg.id);
+  const adId = (await Dbm.db.get<{ id: number }>("INSERT INTO marketing_ads (company_id, account_id, campaign_id, provider, external_id, name, status, created_at, updated_at) VALUES (?, ?, ?, 'META', 'ad-1', 'Vídeo corte degradê', 'ACTIVE', ?, ?) RETURNING id", companyId, meta, cm.id, daysAgo(1), daysAgo(1)))!.id;
+  seq += 1;
+  const contactId = (await Dbm.db.get<{ id: number }>("INSERT INTO contacts (company_id, name, phone, created_at, source, attribution_confidence, attribution_provider, external_campaign_id, external_ad_id) VALUES (?, 'Lead do anúncio', ?, ?, 'META_ADS', 'CONFIRMADA', 'META', ?, 'ad-1') RETURNING id", companyId, `+55 11 9${String(seq).padStart(4, "0")}-5555`, daysAgo(2), cm.externalId))!.id;
+  await Dbm.db.run("INSERT INTO conversations (company_id, contact_id, created_at, updated_at) VALUES (?, ?, ?, ?)", companyId, contactId, daysAgo(2, 15), daysAgo(2, 15));
+  const period = B.resolvePeriod("30d", {}, TZ, new Date("2026-09-15T15:00:00Z"));
+  const all = await B.computeCompanyBi(companyId, TZ, period, B.EMPTY_FILTERS);
+  assert.equal(all.current.platform.spendCents, 15000);
+  const byObjective = await B.computeCompanyBi(companyId, TZ, period, { ...B.EMPTY_FILTERS, objective: "SEARCH" });
+  assert.equal(byObjective.current.platform.spendCents, 10000, "objetivo SEARCH só traz a campanha Google");
+  assert.equal(byObjective.current.crm.leads, 0, "lead do anúncio Meta fica fora do filtro por objetivo Google");
+  const byAccount = await B.computeCompanyBi(companyId, TZ, period, { ...B.EMPTY_FILTERS, accountId: meta });
+  assert.equal(byAccount.current.platform.spendCents, 5000, "conta Meta só traz o investimento Meta");
+  assert.deepEqual(B.parseFilters({ objetivo: "SEARCH", conta: String(meta) }), { ...B.EMPTY_FILTERS, objective: "SEARCH", accountId: meta });
+  assert.equal(all.creatives.length, 1);
+  assert.equal(all.creatives[0].ad.id, adId);
+  assert.equal(all.creatives[0].leads, 1, "lead atribuído ao anúncio via external_ad_id");
+  assert.equal(all.creatives[0].hasMediaData, false, "sem métricas nível AD sincronizadas → sem investimento por anúncio (nunca zero)");
+  assert.equal(all.creatives[0].cpl, null);
+  assert.equal(all.heatmap.total, 1, "conversa entra no mapa de calor");
+  assert.ok(all.heatmap.bestHour !== null);
+});
+
+test("v3: telas de Metas, Criativos e dashboard consolidado renderizam com dados reais e estados vazios honestos; menu tem Criativos e Metas", async () => {
+  const companyId = await makeCompany("Telas v3");
+  const admin = await makeUser(false);
+  await makeMembership(admin, companyId, "COMPANY_ADMIN");
+  const meta = await makeAccount(companyId, "META");
+  const cm = await makeCampaign(companyId, meta, "META", "Corte", 1000, 5);
+  await makeLead(companyId, "META_ADS", cm.externalId, true, 20000);
+  const base = await pageBase(companyId, admin);
+  const month = B.resolvePeriod("mes_atual", {}, TZ, new Date("2026-09-15T15:00:00Z"));
+  const monthBi = await B.computeCompanyBi(companyId, TZ, month, B.EMPTY_FILTERS);
+  const projection = I.projectMonth(monthBi.current, { revenue_cents: 100000, new_customers: 10, leads: null, qualified_leads: null, appointments: null, attendances: null, max_cac_cents: 30000, max_cpl_cents: null, min_roas: null, planned_monthly_spend_cents: null }, TZ, new Date("2026-09-15T15:00:00Z"));
+  const goals = VM.goalsPage(base, { revenue_cents: 100000, new_customers: 10, leads: null, qualified_leads: null, appointments: null, attendances: null, max_cac_cents: 30000, max_cpl_cents: null, min_roas: null, planned_monthly_spend_cents: null }, projection);
+  assert.ok(goals.includes("Meta x realizado") && goals.includes("Ritmo necessário") && goals.includes("Projeção do mês") && goals.includes("Limites de eficiência"));
+  assert.ok(goals.includes("meta R$ 1.000,00"), "meta de faturamento no cartão");
+  assert.ok(goals.includes("Salvar metas"), "administrador da empresa edita");
+  const creatives = VM.creativesPage(base);
+  assert.ok(creatives.includes("Nenhum anúncio sincronizado ainda"), "sem anúncios → estado vazio, sem números inventados");
+  const overview = VM.marketingOverviewPage(base, I.channelCostQuality(base.bi.providers), projection);
+  assert.ok(overview.includes("Horário de ouro") && overview.includes("Radar de performance") && overview.includes("Metas do mês") && overview.includes("Público destaque") && overview.includes("breakdowns"), "blocos novos + nota de estrutura pronta");
+  const dash = VM.dashboardMarketingBlocks(base.bi, I.executiveFunnel(base.bi.current), base.accounts, projection, "COMPANY_ADMIN", false, base.provenance, companyId, { waitingNow: 0, avgFirstResponseMinutes: null, withinSlaPercent: null, slaTargetMinutes: 15, opportunitiesCreated: 1 });
+  assert.ok(dash.includes("Investimento total") && dash.includes("Funil de aquisição") && dash.includes("Contas conectadas") && dash.includes("Leads por atendente") && dash.includes("Campanhas em destaque"));
+  const company = (await Mo.findCompanyById(companyId))!;
+  const user = (await Mo.findUserById(admin))!;
+  const html = V.appShell({ company, user, role: "COMPANY_ADMIN", active: "marketing/metas", body: "x", nav: { canViewMarketing: true, isPlatformAdmin: false, providers: { META: "CONECTADO", GOOGLE: "NAO_CONECTADO" } } });
+  assert.ok(html.includes("<span>Conteúdo / Criativos</span>") && html.includes("<span>Metas</span>") && html.includes("side-company") && html.includes("side-user"));
+});

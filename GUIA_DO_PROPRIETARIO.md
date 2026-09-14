@@ -82,6 +82,8 @@ Acontece quando o token expirou ou a autorização foi removida na Meta/Google.
 
 **Quem vê o Marketing da empresa**: o administrador geral da Hub Action (em qualquer empresa, mesmo vinculado como atendente), o administrador da empresa e o atendente com a permissão `can_view_marketing` ligada. O menu da empresa é OPERAÇÃO / MARKETING (Visão Geral, Meta Ads, Google Ads, Campanhas, Funil & Conversão, Inteligência, Alertas) / GESTÃO — Meta Ads e Google Ads aparecem SEMPRE, com um ponto verde (conectado) ou cinza (não conectado). Um provedor sem conta vinculada mostra um aviso profissional em vez de dados; nada é estimado.
 
+**Telas de marketing da empresa**: Dashboard (visão consolidada Meta + Google + CRM), Visão Geral, Meta Ads, Google Ads, Campanhas, Funil & Conversão, Conteúdo / Criativos, Inteligência (leitura gerencial), Metas (metas do mês, projeção e limites de CPL/CAC/ROAS) e Alertas. Blocos com "estrutura pronta" (público, posicionamento, palavras-chave, mídia por anúncio) mostram "sem dados ainda" até a sincronização buscar esses detalhamentos — nada é estimado.
+
 **Dados reais x demonstração**: enquanto `DEMO_MODE` estiver ligado, a central marca "CRM — dados de demonstração" e as métricas que misturam investimento real com CRM (CPL, CAC, ROAS, receita atribuída) recebem o selo "híbrido". Desligue `DEMO_MODE=false` no Render quando o CRM passar a ser real.
 
 **Marketing → aba Visão Geral → bloco "Meta Ads x Google Ads"**: investimento, leads, qualificados, clientes, CPL, CAC, receita e ROAS lado a lado. Se aparecer o aviso "atribuição apenas provável", parte dos leads daquele canal foi identificada por UTM, não por identificador oficial — trate como estimativa.

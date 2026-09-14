@@ -731,3 +731,30 @@ Marketing: `/empresa/:id/marketing` (central), `/marketing/campanhas`, `/marketi
 - `memberships.can_view_marketing` só pode ser ligado direto no banco (não há tela) — igual a antes.
 - `acceptInvite` (access.ts) sobrescreve a senha de um usuário já existente que aceite um convite — apontado pela auditoria; não tratado nesta etapa.
 - Em produção, para o CRM deixar de ser marcado como "demonstração", desligue `DEMO_MODE=false` no Render (nenhuma variável nova nesta etapa).
+
+## Etapa concluída: Etapa 19 — Painel premium v3 (referência visual do cliente): dashboard consolidado, Metas, Criativos, inteligência executiva
+
+Pedido: redesenhar a experiência ao nível de um SaaS premium seguindo a referência enviada (dark quase preto, magenta como ação/destaque, Meta violeta, Google laranja, verde só para status), com dashboard consolidado, Marketing → Visão Geral / Meta Ads / Google Ads / Conteúdo-Criativos / Inteligência / Metas, gráficos fortes e nada inventado. Trabalho em cima da arquitetura existente (rotas, backend, BI reaproveitados).
+
+### Implementado
+
+- **Design system v3** ([src/views.ts](src/views.ts)): paleta da referência (`--accent #ff3d84`, `--accent-2 #8b5cf6`, gradiente só em ação/seleção, superfícies #0b0b12/#15151f), sidebar fixa com cartão da empresa (nome + plano) e do usuário (nome + papel) como na referência, cards com filete gradiente (`.kpi.hero`), componentes novos: insight cards, goal cards, progress, creative grid, rank list, donut legend, heatmap, status grid, prep-note.
+- **Componentes de gráfico** ([src/charts.ts](src/charts.ts)): `donutChart`, `radarChart`, `stackedBarChart`, `heatmapChart`, `progressBar`, `sparkBars` (mini-barras dos KPIs) — todos SVG server-side, com estado vazio e sem número inventado.
+- **BI** ([src/bi.ts](src/bi.ts)): filtros por **objetivo** (`objetivo=`) e **conta conectada** (`conta=`) resolvidos para um conjunto de campanhas; `creatives` (anúncios com leads/clientes/receita reais por `external_ad_id` e métricas de mídia quando a sincronização gravar o nível AD — hoje vazio, mostrado como "—"); `heatmap` de conversas por dia da semana × hora (fuso da empresa) = "horário de ouro" real.
+- **Navegação**: OPERAÇÃO (Dashboard, Conversas, CRM, Relatórios) · MARKETING (Visão Geral, Meta Ads ●/○, Google Ads ●/○, Campanhas, Funil & Conversão, Conteúdo / Criativos, Inteligência, Metas, Alertas) · GESTÃO (Configurações).
+- **Dashboard geral** (`/empresa/:id/dashboard`, para quem vê marketing): 16 KPIs (investimento total/Meta/Google com mini-barras, leads, qualificados, agendamentos, comparecimentos, clientes, receita atribuída, CAC, CPL, ROAS, conversão do funil, tempo médio de resposta, aguardando humano, oportunidades), Meta x Google por dia, funil de aquisição, leads por atendente, horário de ouro, conversas e atendimento (donut "no prazo"), contas conectadas, por origem, campanhas melhores / que pedem atenção, metas do mês, campanhas em destaque; os blocos operacionais existentes continuam abaixo. Atendente sem capability continua vendo só o operacional.
+- **Marketing — Visão Geral**: + impressões/alcance/cliques/CTR/CPC, leads e clientes por dia, radar Meta x Google, melhores/piores campanhas (regras explícitas), horário de ouro, criativos em destaque, público destaque (estrutura pronta), metas do mês, filtros objetivo e conta.
+- **Meta Ads**: saúde da conta (conta, status, sincronização, período + nº de alertas), KPIs próprios, campanhas top/fracas, ranking de anúncios (leads reais por ad id), melhor horário (heatmap), público/posicionamento (estrutura pronta), comparação por período, alertas automáticos por regra. **Google Ads**: idem adaptado (conversões, taxa e custo por conversão, CPC médio); palavras-chave/termos/dispositivos como estrutura pronta (GAQL atual não os busca).
+- **Inteligência**: resumo executivo em destaque, "o que está funcionando" / "o que piorou" (variações ≥ 5% em 7 dias + fatos), gargalos, recomendações, fontes e custo por resultado, onde está desperdiçando dinheiro, comparativo Meta x Google + radar, comparação entre períodos, custo x qualidade, metas, saúde, insights acionáveis, funil, horário de ouro, leads quentes, paradas, SLA, atendentes.
+- **Metas** (`/empresa/:id/marketing/metas`, nova): gauges de faturamento/clientes/leads, cartões meta x realizado (progresso, faltante, ritmo necessário, projeção, gap), limites de CPL/CAC/ROAS, formulário (POST existente `/inteligencia/metas` agora volta para esta tela).
+- **Conteúdo / Criativos** (`/empresa/:id/marketing/criativos`, nova): grid de anúncios (prévia por iniciais — imagem não sincronizada), ranking por leads reais, melhor/pior CTR quando houver mídia por anúncio, comparação; estado vazio quando não há anúncios. Formato (imagem/vídeo/reels/stories/feed) e engajamento: estrutura pronta, marcados como não sincronizados.
+
+### Dados reais x preparados
+
+Reais: tudo que vem de `marketing_metrics_daily` (campanha), CRM (leads, qualificados, agendamentos, comparecimentos, clientes, receita, atribuição por campanha e por anúncio), conversas (horário de ouro, atendimento), metas/projeção, alertas por regra. Preparados (mostrados como "sem dados ainda", nunca estimados): métricas de mídia por anúncio, formato/engajamento/prévia dos criativos, público (idade/gênero/cidade), posicionamento (feed/stories/reels), palavras-chave/termos/dispositivos do Google. Dependem de ampliar a sincronização (insights por anúncio e breakdowns na Meta; segmentos/keyword view no GAQL) — sem mudança de front.
+
+### Verificado
+
+- `npx tsc --noEmit` limpo · `npm run build` ok · **128/128 testes em SQLite e Postgres** (novos: filtros objetivo/conta, criativos por anúncio, heatmap, telas Metas/Criativos/dashboard, menu).
+- Capturas 1440/1280 (Chrome headless, SQLite descartável): dashboard consolidado, visão geral, Meta, Google, criativos (vazio e com dados), metas, inteligência.
+- Sem novas variáveis de ambiente; rotas antigas preservadas; Meta/Google 100% somente leitura.

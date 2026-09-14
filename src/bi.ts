@@ -147,14 +147,21 @@ export interface BiFilters {
   campaignId: number | null;
   attendantUserId: number | null;
   stageId: number | null;
+  /** Objetivo da campanha (Meta objective / tipo Google), como veio da plataforma. */
+  objective: string | null;
+  /** Conta de anúncios vinculada (marketing_accounts.id). */
+  accountId: number | null;
+  /** Interno: conjunto de campanhas resolvido a partir de objetivo/conta — preenchido por computeCompanyBi. */
+  campaignIds?: Set<number> | null;
 }
 
-export const EMPTY_FILTERS: BiFilters = { channel: "ALL", campaignId: null, attendantUserId: null, stageId: null };
+export const EMPTY_FILTERS: BiFilters = { channel: "ALL", campaignId: null, attendantUserId: null, stageId: null, objective: null, accountId: null };
 
 export function parseFilters(q: Record<string, string | undefined>): BiFilters {
   const channel = q.canal && (LEAD_SOURCES as string[]).includes(q.canal) ? (q.canal as LeadSource) : "ALL";
   const num = (v?: string) => (v && /^\d+$/.test(v) ? Number(v) : null);
-  return { channel, campaignId: num(q.campanha), attendantUserId: num(q.atendente), stageId: num(q.etapa) };
+  const objective = q.objetivo && /^[A-Za-z0-9_ -]{1,60}$/.test(q.objetivo) ? q.objetivo : null;
+  return { channel, campaignId: num(q.campanha), attendantUserId: num(q.atendente), stageId: num(q.etapa), objective, accountId: num(q.conta) };
 }
 
 // --- Fatos brutos (uma carga por requisição, agregação em memória) ---------
@@ -205,6 +212,7 @@ interface MetricFact {
   provider: MarketingProvider;
   account_id: number;
   campaign_id: number | null;
+  ad_id?: number | null;
   level: string;
   metric_date: string;
   currency: string | null;
@@ -220,7 +228,21 @@ interface MetricFact {
   platform_conversion_value_cents: number | null;
 }
 
+export interface AdFact {
+  id: number;
+  external_id: string;
+  name: string;
+  status: string | null;
+  campaign_id: number;
+  ad_group_id: number | null;
+  provider: MarketingProvider;
+}
+
 export interface CrmFacts {
+  /** Anúncios sincronizados (Meta) — base dos "criativos". */
+  ads: AdFact[];
+  /** Métricas diárias no nível do anúncio (level = 'AD'); vazio enquanto a sincronização só gravar campanha. */
+  adMetrics: MetricFact[];
   contacts: ContactFact[];
   opportunities: OpportunityFact[];
   conversations: ConversationFact[];
@@ -255,7 +277,7 @@ export async function loadFacts(companyId: number, timeZone: string, from: strin
   const campaigns = await listCampaignsForCompany(companyId);
   const byExternal = new Map(campaigns.map((c) => [c.external_id, c.id]));
   const byName = new Map(campaigns.map((c) => [c.name.trim().toLowerCase(), c.id]));
-  const ads = await db.all<{ external_id: string; campaign_id: number }>("SELECT external_id, campaign_id FROM marketing_ads WHERE company_id = ?", companyId);
+  const ads = await db.all<AdFact>("SELECT id, external_id, name, status, campaign_id, ad_group_id, provider FROM marketing_ads WHERE company_id = ?", companyId);
   const adGroups = await db.all<{ external_id: string; campaign_id: number }>("SELECT external_id, campaign_id FROM marketing_ad_groups WHERE company_id = ?", companyId);
   const adToCampaign = new Map(ads.map((a) => [a.external_id, a.campaign_id]));
   const adGroupToCampaign = new Map(adGroups.map((g) => [g.external_id, g.campaign_id]));
@@ -294,7 +316,15 @@ export async function loadFacts(companyId: number, timeZone: string, from: strin
     from,
     to
   );
-  return { contacts, opportunities, conversations, waits, metrics, campaigns, contactById: new Map(contacts.map((c) => [c.id, c])), rangeUtc: { fromIso, toIso } };
+  const adMetrics = await db.all<MetricFact>(
+    `SELECT provider, account_id, campaign_id, ad_id, level, metric_date, currency, spend_cents, impressions, reach, frequency, clicks, link_clicks,
+            platform_conversations, platform_leads, platform_conversions, platform_conversion_value_cents
+     FROM marketing_metrics_daily WHERE company_id = ? AND level = 'AD' AND metric_date >= ? AND metric_date <= ?`,
+    companyId,
+    from,
+    to
+  );
+  return { ads, adMetrics, contacts, opportunities, conversations, waits, metrics, campaigns, contactById: new Map(contacts.map((c) => [c.id, c])), rangeUtc: { fromIso, toIso } };
 }
 
 // --- Agregação de um período ----------------------------------------------------
@@ -377,7 +407,17 @@ function isPaid(source: LeadSource): boolean {
 function contactMatches(c: ContactFact, f: BiFilters): boolean {
   if (f.channel !== "ALL" && c.source !== f.channel) return false;
   if (f.campaignId !== null && c.campaignId !== f.campaignId) return false;
+  if (f.campaignIds && (c.campaignId === null || !f.campaignIds.has(c.campaignId))) return false;
   return true;
+}
+
+/** Objetivo/conta viram um conjunto de campanhas (resolvido uma vez por requisição). Sem os dois filtros → null (sem restrição). */
+export function scopeFilters(f: BiFilters, campaigns: MarketingCampaign[]): BiFilters {
+  if (f.objective === null && f.accountId === null) return { ...f, campaignIds: null };
+  const ids = campaigns
+    .filter((c) => (f.objective === null || (c.objective ?? c.campaign_type ?? "") === f.objective) && (f.accountId === null || c.account_id === f.accountId))
+    .map((c) => c.id);
+  return { ...f, campaignIds: new Set(ids) };
 }
 
 function metricMatches(m: MetricFact, f: BiFilters): boolean {
@@ -385,6 +425,7 @@ function metricMatches(m: MetricFact, f: BiFilters): boolean {
   if (f.channel === "GOOGLE_ADS" && m.provider !== "GOOGLE") return false;
   if (f.channel !== "ALL" && !isPaid(f.channel)) return false; // investimento só existe em mídia paga
   if (f.campaignId !== null && m.campaign_id !== f.campaignId) return false;
+  if (f.campaignIds && (m.campaign_id === null || !f.campaignIds.has(m.campaign_id))) return false;
   return true;
 }
 
@@ -537,6 +578,96 @@ export function dailySeries(facts: CrmFacts, period: Period, timeZone: string, f
       cpm: p.cpm,
     };
   });
+}
+
+// --- Horário de ouro: conversas por dia da semana × hora --------------------------
+
+export interface ConversationHeatmap {
+  /** 7 linhas (segunda → domingo) × 24 colunas; null quando não há nenhuma conversa no período. */
+  cells: (number | null)[][];
+  total: number;
+  /** Melhor faixa (hora com mais conversas) e participação dela no total. */
+  bestHour: number | null;
+  bestShare: number | null;
+}
+
+export function conversationHeatmap(facts: CrmFacts, period: Period, timeZone: string, f: BiFilters): ConversationHeatmap {
+  const { startUtc, endUtc } = localDayRangeToUtc(period.from, period.to, timeZone);
+  const fromIso = startUtc.toISOString();
+  const toIso = endUtc.toISOString();
+  const fmt = new Intl.DateTimeFormat("en-US", { timeZone, weekday: "short", hour: "numeric", hour12: false });
+  const dayIndex: Record<string, number> = { Mon: 0, Tue: 1, Wed: 2, Thu: 3, Fri: 4, Sat: 5, Sun: 6 };
+  const cells: (number | null)[][] = Array.from({ length: 7 }, () => Array.from({ length: 24 }, () => null));
+  const byHour = new Array<number>(24).fill(0);
+  let total = 0;
+  for (const c of facts.conversations) {
+    if (!inRange(c.created_at, fromIso, toIso)) continue;
+    const contact = facts.contactById.get(c.contact_id);
+    if (!contact || !contactMatches(contact, f)) continue;
+    if (f.attendantUserId !== null && c.assigned_user_id !== f.attendantUserId) continue;
+    const parts = fmt.formatToParts(new Date(c.created_at));
+    const wd = dayIndex[parts.find((p) => p.type === "weekday")?.value ?? ""];
+    const hour = Number(parts.find((p) => p.type === "hour")?.value ?? "0") % 24;
+    if (wd === undefined) continue;
+    cells[wd][hour] = (cells[wd][hour] ?? 0) + 1;
+    byHour[hour] += 1;
+    total += 1;
+  }
+  if (total === 0) return { cells, total: 0, bestHour: null, bestShare: null };
+  let bestHour = 0;
+  for (let h = 1; h < 24; h++) if (byHour[h] > byHour[bestHour]) bestHour = h;
+  return { cells, total, bestHour, bestShare: byHour[bestHour] / total };
+}
+
+// --- Por anúncio (criativos) ---------------------------------------------------
+
+export interface CreativeRow {
+  ad: AdFact;
+  campaignName: string;
+  /** Métricas de mídia do anúncio — só existem quando a sincronização grava o nível AD. */
+  platform: PlatformMetrics;
+  hasMediaData: boolean;
+  /** Leads/clientes do CRM atribuídos a este anúncio (contacts.external_ad_id), sempre reais. */
+  leads: number;
+  qualified: number;
+  customers: number;
+  revenueCents: number;
+  cpl: number | null;
+  cac: number | null;
+}
+
+export function creativeRows(facts: CrmFacts, period: Period, timeZone: string, f: BiFilters): CreativeRow[] {
+  const { startUtc, endUtc } = localDayRangeToUtc(period.from, period.to, timeZone);
+  const fromIso = startUtc.toISOString();
+  const toIso = endUtc.toISOString();
+  const campaignName = new Map(facts.campaigns.map((c) => [c.id, c.name]));
+  return facts.ads
+    .filter((ad) => f.campaignId === null || ad.campaign_id === f.campaignId)
+    .filter((ad) => !f.campaignIds || f.campaignIds.has(ad.campaign_id))
+    .filter((ad) => f.channel === "ALL" || (f.channel === "META_ADS" && ad.provider === "META") || (f.channel === "GOOGLE_ADS" && ad.provider === "GOOGLE"))
+    .map((ad) => {
+      const metrics = facts.adMetrics.filter((m) => m.ad_id === ad.id && m.metric_date >= period.from && m.metric_date <= period.to);
+      const platform = aggregatePlatform(metrics);
+      const leadsList = facts.contacts.filter((c) => c.external_ad_id === ad.external_id && inRange(c.created_at, fromIso, toIso) && contactMatches(c, f));
+      const leadIds = new Set(leadsList.map((c) => c.id));
+      const qualified = facts.opportunities.filter((o) => leadIds.has(o.contact_id) && inRange(o.qualified_at, fromIso, toIso)).length;
+      const won = facts.opportunities.filter((o) => o.is_won === 1 && leadIds.has(o.contact_id) && inRange(o.closed_at, fromIso, toIso));
+      const spend = platform.hasSpendData ? platform.spendCents : null;
+      const customers = new Set(won.map((o) => o.contact_id)).size;
+      return {
+        ad,
+        campaignName: campaignName.get(ad.campaign_id) ?? "—",
+        platform,
+        hasMediaData: platform.hasSpendData,
+        leads: leadsList.length,
+        qualified,
+        customers,
+        revenueCents: won.reduce((s, o) => s + o.value_cents, 0),
+        cpl: ratio(spend, leadsList.length),
+        cac: ratio(spend, customers),
+      };
+    })
+    .sort((a, b) => b.leads - a.leads || (b.platform.spendCents - a.platform.spendCents));
 }
 
 // --- Por campanha -------------------------------------------------------------
@@ -748,6 +879,10 @@ export interface CompanyBi {
   previousDaily: DailyPoint[];
   /** Série diária só de cada provedor (mesmos filtros, canal forçado) — para comparar Meta x Google no tempo. */
   dailyByProvider: Record<MarketingProvider, DailyPoint[]>;
+  /** Anúncios (criativos) com leads do CRM atribuídos e, quando sincronizadas, métricas de mídia do anúncio. */
+  creatives: CreativeRow[];
+  /** Conversas por dia da semana × hora no período (fuso da empresa). */
+  heatmap: ConversationHeatmap;
   campaigns: CampaignRow[];
   channels: ChannelRow[];
   providers: ProviderComparison[];
@@ -760,10 +895,11 @@ export interface CompanyBi {
   confidenceLabels: typeof CONFIDENCE_LABELS;
 }
 
-export async function computeCompanyBi(companyId: number, timeZone: string, period: ResolvedPeriod, filters: BiFilters): Promise<CompanyBi> {
+export async function computeCompanyBi(companyId: number, timeZone: string, period: ResolvedPeriod, rawFilters: BiFilters): Promise<CompanyBi> {
   const from = period.previous.from < period.current.from ? period.previous.from : period.current.from;
   const to = period.current.to > period.previous.to ? period.current.to : period.previous.to;
   const facts = await loadFacts(companyId, timeZone, from, to);
+  const filters = scopeFilters(rawFilters, facts.campaigns);
   const accounts = await listAccountsForCompany(companyId);
   const current = snapshot(facts, period.current, timeZone, filters);
   const previous = snapshot(facts, period.previous, timeZone, filters);
@@ -779,6 +915,8 @@ export async function computeCompanyBi(companyId: number, timeZone: string, peri
       GOOGLE: dailySeries(facts, period.current, timeZone, { ...filters, channel: "GOOGLE_ADS" }),
     },
     campaigns: await campaignRows(companyId, facts, period.current, timeZone, filters),
+    creatives: creativeRows(facts, period.current, timeZone, filters),
+    heatmap: conversationHeatmap(facts, period.current, timeZone, filters),
     channels: channelRows(facts, period.current, timeZone, filters),
     providers: await providerComparison(companyId, facts, period.current, timeZone, filters),
     attendants: await attendantRows(companyId, facts, period.current, timeZone),

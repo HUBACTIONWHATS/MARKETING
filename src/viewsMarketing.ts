@@ -8,9 +8,9 @@
  */
 import { CONFIDENCE_LABELS, SOURCE_LABELS, type AttributionConfidence, type LeadSource } from "./attribution";
 import type { AlertRow, AlertStatus } from "./alerts";
-import type { BiFilters, CampaignRow, CompanyBi, DailyPoint, PeriodSnapshot, ProviderComparison, ResolvedPeriod } from "./bi";
-import { deltaPercent } from "./bi";
-import { barChart, bubbleChart, COLORS, emptyChart, funnelChart, gaugeChart, lineChart, sparkline, type Series } from "./charts";
+import type { BiFilters, CampaignRow, CompanyBi, CreativeRow, DailyPoint, PeriodSnapshot, ProviderComparison, ResolvedPeriod } from "./bi";
+import { deltaPercent, ratio } from "./bi";
+import { barChart, bubbleChart, COLORS, donutChart, emptyChart, funnelChart, gaugeChart, heatmapChart, lineChart, progressBar, radarChart, sparkBars, sparkline, type Series } from "./charts";
 import {
   fmtBRL,
   fmtDelta,
@@ -28,6 +28,7 @@ import {
   type CompanyGoals,
   type CostQualityInsight,
   type FunnelStage,
+  type GoalProgress,
   type HealthScore,
   type MonthProjection,
   type ScoredLead,
@@ -87,6 +88,10 @@ export function kpiCard(opts: {
   previousLabel: string;
   /** Mistura investimento real com CRM em modo de demonstração — marcado na tela, nunca escondido. */
   hybrid?: boolean;
+  /** Sparkline em mini-barras (referência visual) em vez de linha. */
+  bars?: boolean;
+  /** Card de destaque (filete gradiente no topo, valor maior). */
+  hero?: boolean;
 }): string {
   const d = deltaPercent(opts.current, opts.previous);
   let deltaHtml = `<div class="kpi-delta muted">${opts.previous === null || opts.previous === undefined ? "sem base de comparação" : "—"}</div>`;
@@ -99,11 +104,11 @@ export function kpiCard(opts: {
     const arrow = up ? "↑" : down ? "↓" : "→";
     deltaHtml = `<div class="${cls}"><span class="arrow" aria-hidden="true">${arrow}</span><span>${fmtDelta(d)}</span> <span class="vs">vs ${escapeHtml(opts.previousLabel)}</span></div>`;
   }
-  return `<div class="kpi ${opts.secondary ? "kpi-secondary" : ""}">
+  return `<div class="kpi ${opts.secondary ? "kpi-secondary" : ""}${opts.hero ? " hero" : ""}">
     <div class="kpi-label">${tip(opts.label, opts.tooltip)}${opts.hybrid ? '<span class="chip chip-warn chip-xs" title="Híbrido: investimento real com CRM em modo de demonstração — não use para decisão">híbrido</span>' : ""}</div>
     <div class="kpi-value">${escapeHtml(opts.value)}</div>
     ${deltaHtml}
-    ${opts.spark && !opts.secondary ? sparkline(opts.spark, opts.sparkColor ?? COLORS.accent) : ""}
+    ${opts.spark && !opts.secondary ? (opts.bars ? sparkBars(opts.spark, opts.sparkColor ?? COLORS.accent) : sparkline(opts.spark, opts.sparkColor ?? COLORS.accent)) : ""}
   </div>`;
 }
 
@@ -127,6 +132,8 @@ export function queryString(period: ResolvedPeriod, f: BiFilters, override: Reco
   if (f.campaignId !== null) p.set("campanha", String(f.campaignId));
   if (f.attendantUserId !== null) p.set("atendente", String(f.attendantUserId));
   if (f.stageId !== null) p.set("etapa", String(f.stageId));
+  if (f.objective !== null) p.set("objetivo", f.objective);
+  if (f.accountId !== null) p.set("conta", String(f.accountId));
   for (const [k, v] of Object.entries(override)) {
     if (v === null) p.delete(k);
     else p.set(k, v);
@@ -139,6 +146,10 @@ export interface FilterOptions {
   campaigns: MarketingCampaign[];
   members: { user_id: number; name: string }[];
   stages: { id: number; name: string }[];
+  /** Contas de anúncios vinculadas à empresa (filtro "conta conectada"). */
+  accounts?: MarketingAccountWithConnection[];
+  /** Objetivos distintos das campanhas sincronizadas (filtro "objetivo"). */
+  objectives?: string[];
 }
 
 /** Barra de filtros globais (GET) — reflete em todos os componentes da página. */
@@ -150,6 +161,9 @@ export function filterBar(basePath: string, period: ResolvedPeriod, f: BiFilters
   const campaignOptions = `<option value="">Todas as campanhas</option>` + opts.campaigns.map((c) => `<option value="${c.id}" ${f.campaignId === c.id ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("");
   const memberOptions = `<option value="">Todos os atendentes</option>` + opts.members.map((m) => `<option value="${m.user_id}" ${f.attendantUserId === m.user_id ? "selected" : ""}>${escapeHtml(m.name)}</option>`).join("");
   const stageOptions = `<option value="">Todas as etapas</option>` + opts.stages.map((s) => `<option value="${s.id}" ${f.stageId === s.id ? "selected" : ""}>${escapeHtml(s.name)}</option>`).join("");
+  const objectiveOptions = `<option value="">Todos os objetivos</option>` + (opts.objectives ?? []).map((o) => `<option value="${escapeHtml(o)}" ${f.objective === o ? "selected" : ""}>${escapeHtml(o)}</option>`).join("");
+  const accountOptions = `<option value="">Todas as contas</option>` + (opts.accounts ?? []).map((a) => `<option value="${a.id}" ${f.accountId === a.id ? "selected" : ""}>${escapeHtml(`${PROVIDER_LABELS[a.provider]} · ${a.name ?? a.external_account_id}`)}</option>`).join("");
+  const extraFilters = (opts.objectives && opts.objectives.length ? `<div class="field"><label>Objetivo<select name="objetivo">${objectiveOptions}</select></label></div>` : "") + (opts.accounts && opts.accounts.length ? `<div class="field"><label>Conta conectada<select name="conta">${accountOptions}</select></label></div>` : "");
   return `<form method="get" action="${basePath}" class="filter-bar">
     <div class="field" style="min-width:100%"><div class="preset-links">${presets}<a href="#" class="${period.preset === "personalizado" ? "active" : ""}" onclick="return false">Personalizado ↓</a></div></div>
     <input type="hidden" name="periodo" value="personalizado" />
@@ -159,6 +173,7 @@ export function filterBar(basePath: string, period: ResolvedPeriod, f: BiFilters
     <div class="field"><label>Campanha<select name="campanha">${campaignOptions}</select></label></div>
     <div class="field"><label>Atendente<select name="atendente">${memberOptions}</select></label></div>
     <div class="field"><label>Etapa CRM<select name="etapa">${stageOptions}</select></label></div>
+    ${extraFilters}
     <button type="submit" class="btn btn-small btn-primary">Aplicar</button>
     <span class="freshness ${freshness.cls}" style="margin-left:auto"><span class="dot"></span>${escapeHtml(freshness.text)}</span>
   </form>`;
@@ -504,29 +519,69 @@ function shellFor(base: MarketingPageBase, active: string, body: string): string
   return appShell({ company: base.company, user: base.user, role: base.role, active, body, canViewMarketing: base.canViewMarketing });
 }
 
-export function marketingOverviewPage(base: MarketingPageBase, costQuality: ChannelCostQuality): string {
+export function marketingOverviewPage(base: MarketingPageBase, costQuality: ChannelCostQuality, projection: MonthProjection | null = null): string {
   const { company, bi } = base;
   const basePath = `/empresa/${company.id}/marketing`;
   const qs = queryString(bi.period, bi.filters);
   const fresh = freshnessLabel(bi.freshness.lastSuccessAt);
   const hybrid = isHybrid(base.provenance);
-  const body = `${pageHead(`Marketing — ${company.name}`, `Meta Ads + Google Ads + CRM + vendas · ${bi.period.label} · comparado com ${bi.period.previousLabel}`)}
+  const c = bi.current;
+  const p = bi.previous;
+  const prev = bi.period.previousLabel;
+  const num = (v: number | null) => (v === null ? "—" : fmtNum(v));
+  const platformRow = `<div class="kpi-grid" style="grid-template-columns:repeat(5,minmax(0,1fr))">
+    ${kpiCard({ label: "Impressões", tooltip: "Exibições reportadas pelas plataformas.", value: num(c.platform.impressions), current: c.platform.impressions, previous: p.platform.impressions, previousLabel: prev, secondary: true })}
+    ${kpiCard({ label: "Alcance", tooltip: "Pessoas alcançadas (só Meta fornece).", value: num(c.platform.reach), current: c.platform.reach, previous: p.platform.reach, previousLabel: prev, secondary: true })}
+    ${kpiCard({ label: "Cliques", tooltip: "Cliques reportados pelas plataformas.", value: num(c.platform.clicks), current: c.platform.clicks, previous: p.platform.clicks, previousLabel: prev, secondary: true })}
+    ${kpiCard({ label: "CTR", tooltip: "Cliques ÷ impressões.", value: fmtPct(c.platform.ctr, 2), current: c.platform.ctr, previous: p.platform.ctr, previousLabel: prev, secondary: true })}
+    ${kpiCard({ label: "CPC", tooltip: "Investimento ÷ cliques.", value: c.platform.cpc === null ? "—" : fmtBRL(c.platform.cpc), current: c.platform.cpc, previous: p.platform.cpc, previousLabel: prev, secondary: true, lowerIsBetter: true })}
+  </div>`;
+  const leadsDaily = lineChart({
+    series: [
+      { name: "Leads", color: COLORS.accent, points: bi.daily.map((d) => ({ label: ddmm(d.date), value: d.leads })), format: (v) => fmtNum(v) },
+      { name: "Clientes (vendas)", color: COLORS.positive, points: bi.daily.map((d) => ({ label: ddmm(d.date), value: d.sales })), format: (v) => fmtNum(v) },
+    ],
+    height: 240,
+    ariaLabel: "Leads e clientes por dia",
+  });
+  const bestWorst = bestWorstCampaigns(bi.campaigns, company.id, qs);
+  const topCreatives = bi.creatives.filter((cr) => cr.leads > 0).slice(0, 4);
+  const creativesBlock = topCreatives.length
+    ? `<div class="creative-grid">${topCreatives.map((cr) => creativeCard(cr, company.id, qs)).join("")}</div>`
+    : bi.creatives.length
+      ? '<p class="muted small">Anúncios sincronizados, mas nenhum lead atribuído a anúncio no período.</p>'
+      : prepNote("Criativos aparecem quando a conta Meta Ads sincroniza anúncios (campanha → conjunto → anúncio).");
+  const body = `${pageHead(`Marketing — ${company.name}`, `Meta Ads + Google Ads + CRM + vendas · ${bi.period.label} · comparado com ${prev}`)}
     ${tabs(company.id, "visao", qs)}
     ${filterBar(basePath, bi.period, bi.filters, base.filterOptions, fresh)}
     ${provenanceStrip(base.provenance, bi.providers)}
     ${noIntegrationNotice(bi, base.role)}
     ${primaryKpis(bi, hybrid)}
-    <div class="card-block">${chartHead("Meta Ads x Google Ads", `${bi.period.label} · plataforma e CRM lado a lado · "—" = não fornecido pelo provedor (nunca zero inventado)`)}${providerComparisonBlock(bi)}</div>
+    ${platformRow}
+    <div class="grid-12">
+      <div class="col-8">${investmentChart(bi)}</div>
+      <div class="col-4"><div class="card-block">${chartHead("Leads e clientes por dia", bi.period.label)}${leadsDaily}</div></div>
+    </div>
     ${masterProviderChart(bi, basePath, qs, base.masterMetric)}
-    ${investmentChart(bi)}
+    <div class="card-block">${chartHead("Meta Ads x Google Ads", `${bi.period.label} · plataforma e CRM lado a lado · "—" = não fornecido pelo provedor (nunca zero inventado)`)}<div class="grid-12"><div class="col-7">${providerComparisonBlock(bi)}</div><div class="col-5"><div class="eyebrow" style="margin-bottom:8px">Radar de performance</div>${providerRadar(bi)}</div></div></div>
     <div class="grid-12">
       <div class="col-6"><div class="card-block">${chartHead("Funil — do anúncio à venda", `${bi.period.label} · conversão etapa a etapa`, channelQuickLinks(basePath, bi))}${funnelBlock(base.funnel, company.id, qs)}</div></div>
       <div class="col-6">${channelPerformanceBlock(bi, basePath, qs, base.channelMetric)}</div>
     </div>
+    <div class="grid-12">
+      <div class="col-4"><div class="card-block">${chartHead("Campanhas com melhor desempenho", "clientes gerados; desempate por ROAS")}${bestWorst.best}</div></div>
+      <div class="col-4"><div class="card-block">${chartHead("Campanhas com pior desempenho", "investimento sem lead ou CPL 30% acima da média")}${bestWorst.worst}</div></div>
+      <div class="col-4"><div class="card-block">${chartHead("Horário de ouro", "conversas por dia da semana × hora")}${heatmapBlock(bi)}</div></div>
+    </div>
     ${costQualityByChannelBlock(costQuality)}
+    <div class="grid-12">
+      <div class="col-8"><div class="card-block">${chartHead("Criativos em destaque", "anúncios com mais leads atribuídos no período", `<a class="small" href="${basePath}/criativos${qs}">Ver todos →</a>`)}${creativesBlock}</div></div>
+      <div class="col-4"><div class="card-block">${chartHead("Público destaque", "idade, gênero, cidade e posicionamento")}${prepNote("A sincronização atual não busca os detalhamentos demográficos e de posicionamento da Meta (breakdowns). Estrutura pronta para recebê-los; nada é estimado até lá.")}</div></div>
+    </div>
+    ${projection ? `<div class="card-block">${chartHead("Metas do mês", `dia ${projection.daysElapsed} de ${projection.daysInMonth}`, `<a class="btn btn-small" href="${basePath}/metas">Gerenciar metas →</a>`)}${goalsMini(projection, company.id)}</div>` : ""}
     <div class="card-block">${chartHead("Custo de aquisição", hybrid ? "Métricas híbridas: investimento real com CRM em modo de demonstração" : `${bi.period.label} · custo por etapa do funil e taxas`)}${secondaryKpis(bi, hybrid)}</div>
     <div class="card-block">${chartHead("Campanhas — Meta Ads e Google Ads", `${bi.period.label} · as 8 maiores por ${base.sort ?? "investimento"}`, `<a class="btn btn-small" href="${basePath}/campanhas${qs}">Ver tabela completa</a>`)}${campaignsTable(bi.campaigns.slice(0, 8), company.id, qs, company.timezone, base.sort)}</div>
-    <div class="card-block">${chartHead("Precisa de atenção", "Fatos por canal (Meta, Google, mídia em geral, CRM, integração); recomendações separadas dos fatos")}${attentionBlock(base.attention)}</div>
+    <div class="card-block">${chartHead("Precisa de atenção", "Fatos por canal; recomendações separadas dos fatos")}${attentionBlock(base.attention)}</div>
     <div class="card-block">${chartHead("Integrações", "Conta, status e última sincronização por provedor — tokens nunca aparecem")}${integrationsBlock(base.accounts, company.name, base.role, base.isPlatformAdmin)}
       <p class="small muted" style="margin:12px 0 0">Última sincronização concluída — Meta Ads: ${fmtDateTime(bi.freshness.byProvider.META, company.timezone)} · Google Ads: ${fmtDateTime(bi.freshness.byProvider.GOOGLE, company.timezone)}</p>
       ${base.role === "COMPANY_ADMIN" && bi.hasAnyIntegration ? `<div style="margin-top:8px"><form method="post" action="${basePath}/atualizar" style="display:inline"><button type="submit" class="btn btn-small">Atualizar agora</button></form> <span class="small muted">(no máximo uma vez a cada 15 minutos por empresa)</span></div>` : ""}
@@ -605,6 +660,9 @@ export function marketingProviderPage(base: MarketingPageBase, provider: Marketi
   const head = `${pageHead(`${label} — ${company.name}`, `${bi.period.label} · comparado com ${bi.period.previousLabel} · só dados ${label} desta empresa`)}
     ${tabs(company.id, key, qs)}
     ${filterBar(basePath, bi.period, bi.filters, base.filterOptions, freshnessLabel(bi.freshness.byProvider[provider]))}`;
+  const health = providerHealthGrid(base.accounts, provider, bi.freshness.byProvider[provider], base.attention, bi.period.label);
+  const alerts = base.attention.filter((a) => a.channel === provider || a.channel === "MIDIA" || (a.channel === "INTEGRACAO" && a.fact.startsWith(label)));
+  const alertsBlock = alerts.length ? attentionBlock(alerts) : '<p class="muted small">Nenhum alerta automático para este canal com os dados atuais (CPL/CAC subindo, CTR em queda, gasto sem lead, conta sem sincronização).</p>';
   // Provedor sem conta vinculada: a área existe (nunca 404), com estado vazio profissional e CTA por papel.
   if (accounts.length === 0) {
     const c = bi.current;
@@ -617,31 +675,50 @@ export function marketingProviderPage(base: MarketingPageBase, provider: Marketi
             ${kpiCard({ label: "Receita atribuída", tooltip: "Receita das vendas atribuídas a este canal.", value: fmtBRL(c.crm.attributedRevenueCents), current: c.crm.attributedRevenueCents, previous: bi.previous.crm.attributedRevenueCents, previousLabel: bi.period.previousLabel })}
           </div></div>`
         : "";
-    return shellFor(base, `marketing/${key}`, `${head}${providerEmptyState(provider, company.name, base.role, base.isPlatformAdmin)}${crmNote}`);
+    return shellFor(base, `marketing/${key}`, `${head}<div class="card-block">${chartHead("Saúde da conta", "conta, status, sincronização e período")}${health}</div>${providerEmptyState(provider, company.name, base.role, base.isPlatformAdmin)}${crmNote}`);
   }
   const provCampaigns = bi.campaigns.filter((r) => r.campaign.provider === provider);
   const color = provider === "META" ? COLORS.meta : COLORS.google;
   const campaignBars = barChart({
     items: provCampaigns
       .filter((r) => r.platform.hasSpendData)
-      .map((r) => ({
-        label: r.campaign.name,
-        value: r.platform.spendCents,
-        color,
-        tooltip: `${r.campaign.name} — investimento ${fmtBRL(r.platform.spendCents)}, leads ${r.crm.leads}, clientes ${r.crm.newCustomers}, CPL ${fmtBRL(r.kpis.cpl)}, CAC ${fmtBRL(r.kpis.cac)}`,
-      })),
+      .map((r) => ({ label: r.campaign.name, value: r.platform.spendCents, color, tooltip: `${r.campaign.name} — investimento ${fmtBRL(r.platform.spendCents)}, leads ${r.crm.leads}, clientes ${r.crm.newCustomers}, CPL ${fmtBRL(r.kpis.cpl)}, CAC ${fmtBRL(r.kpis.cac)}` })),
     format: (v) => fmtBRL(Math.round(v)),
     ariaLabel: `Investimento por campanha — ${label}`,
     valueLabel: "Investimento",
   });
-  const hierarchy = provider === "META" ? "Campanha → conjunto de anúncios → anúncio (abra uma campanha para ver a hierarquia)" : "Campanha → grupo de anúncios (abra uma campanha para ver os grupos)";
+  const bestWorst = bestWorstCampaigns(provCampaigns, company.id, qs);
+  const creatives = bi.creatives.filter((cr) => cr.ad.provider === provider);
+  const adRanking = provider === "META"
+    ? `<div class="card-block">${chartHead("Ranking de anúncios", "por leads atribuídos ao anúncio (real, via ad id)", `<a class="small" href="/empresa/${company.id}/marketing/criativos${qs}">Ver criativos →</a>`)}${creatives.length ? rankList(creatives.slice(0, 8).map((cr) => ({ name: cr.ad.name, value: cr.leads, label: `${cr.leads} leads`, sub: cr.customers ? `${cr.customers} cliente(s)` : undefined })), COLORS.meta, "Nenhum lead atribuído a anúncio no período.") : prepNote("Nenhum anúncio sincronizado ainda para esta conta.")}</div>`
+    : `<div class="card-block">${chartHead("Palavras-chave e termos de pesquisa", "estrutura pronta")}${prepNote("A sincronização atual do Google Ads traz campanhas, grupos e métricas diárias — não busca palavras-chave, termos de pesquisa, dispositivos nem horários. Quando a consulta GAQL for ampliada, estes blocos passam a mostrar dados reais; nada é estimado até lá.")}</div>`;
+  const extras = provider === "META"
+    ? `<div class="grid-12">
+        <div class="col-6"><div class="card-block">${chartHead("Melhor horário", "conversas de contatos deste canal por dia × hora")}${heatmapBlock(bi)}</div></div>
+        <div class="col-6"><div class="card-block">${chartHead("Público e posicionamento", "idade, gênero, cidade, feed / stories / reels")}${prepNote("Os detalhamentos (breakdowns) demográficos e de posicionamento da Meta ainda não são sincronizados. Estrutura pronta para recebê-los.")}</div></div>
+      </div>`
+    : `<div class="grid-12">
+        <div class="col-6"><div class="card-block">${chartHead("Horários", "conversas de contatos deste canal por dia × hora")}${heatmapBlock(bi)}</div></div>
+        <div class="col-6"><div class="card-block">${chartHead("Dispositivos", "estrutura pronta")}${prepNote("Desempenho por dispositivo (celular, computador, tablet) depende de segmentação na consulta GAQL, ainda não sincronizada.")}</div></div>
+      </div>`;
   const body = `${head}
     ${provenanceStrip(base.provenance, bi.providers.filter((p) => p.provider === provider))}
+    <div class="card-block">${chartHead("Saúde da conta", "conta, status, sincronização e período analisado")}${health}</div>
     ${providerKpis(bi, provider, hybrid)}
     ${performanceChart(bi, basePath, qs, base.m1, base.m2)}
     <div class="grid-12">
-      <div class="col-6"><div class="card-block">${chartHead("Investimento por campanha", `${bi.period.label} · ${provCampaigns.length} campanha(s) · ${hierarchy}`)}${campaignBars}</div></div>
+      <div class="col-6"><div class="card-block">${chartHead("Investimento por campanha", `${bi.period.label} · ${provCampaigns.length} campanha(s) · ${provider === "META" ? "campanha → conjunto → anúncio" : "campanha → grupo de anúncios"} no detalhe`)}${campaignBars}</div></div>
       <div class="col-6"><div class="card-block">${chartHead(`Funil ${label}`, `${bi.period.label} · do anúncio à venda, só contatos atribuídos a ${label}`)}${funnelBlock(base.funnel, company.id, qs)}</div></div>
+    </div>
+    <div class="grid-12">
+      <div class="col-6"><div class="card-block">${chartHead("Campanhas top", "clientes gerados; desempate por ROAS")}${bestWorst.best}</div></div>
+      <div class="col-6"><div class="card-block">${chartHead("Campanhas fracas", "investimento sem lead ou CPL 30% acima da média")}${bestWorst.worst}</div></div>
+    </div>
+    ${adRanking}
+    ${extras}
+    <div class="grid-12">
+      <div class="col-6"><div class="card-block">${chartHead("Comparação por período", `${bi.period.label} x ${bi.period.previousLabel}`)}${periodComparisonTable(bi)}</div></div>
+      <div class="col-6"><div class="card-block">${chartHead("Alertas automáticos", "regras objetivas: CPL/CAC subindo, CTR em queda, gasto sem lead, conta sem sincronização")}${alertsBlock}</div></div>
     </div>
     <div class="card-block">${chartHead("Custo x qualidade por campanha", "CPL (eixo X) por taxa de fechamento (eixo Y); tamanho da bolha = investimento")}${qualityBubble(provCampaigns)}</div>
     <div class="card-block">${chartHead(`Campanhas ${label}`, `${bi.period.label} · plataforma e CRM lado a lado`)}${campaignsTable(provCampaigns, company.id, qs, company.timezone, base.sort)}</div>
@@ -846,49 +923,95 @@ export function intelligencePage(o: IntelligencePageOpts): string {
     <div class="gauge-legend">${bands.map((b) => `<span><i style="background:${b.color}"></i>${escapeHtml(b.label)}</span>`).join("")}</div>
     <details><summary class="small" style="cursor:pointer;color:#38bdf8">Como é calculado</summary><ul class="small" style="margin:0.5rem 0 0;padding-left:1.1rem">${health.components.map((cmp) => `<li>${escapeHtml(cmp.label)} (peso ${(cmp.weight * 100).toFixed(0)}%): ${cmp.score === null ? "sem dado suficiente" : `${cmp.score.toFixed(0)}`} — <span class="muted">${escapeHtml(cmp.explanation)}</span></li>`).join("")}</ul></details>
     ${health.reasons.length ? `<ul class="small" style="margin:0.5rem 0 0;padding-left:1.1rem;color:#fde68a">${health.reasons.map((r) => `<li>${escapeHtml(r)}</li>`).join("")}</ul>` : ""}`;
-  const body = `${pageHead("Central de Performance", `${mesLabel} · ${o.projection.today} · comparações de 7 dias`)}
+  const bi7 = o.bi7;
+  const c7 = bi7.current;
+  const p7s = bi7.previous;
+  const money = (v: number | null) => (v === null ? "—" : fmtBRL(v));
+  const good: string[] = [];
+  const bad: string[] = [];
+  const judge = (label: string, cur: number | null, prev: number | null, fmt: (v: number) => string, lowerIsBetter = false) => {
+    const d = deltaPercent(cur, prev);
+    if (d === null || cur === null || prev === null || Math.abs(d) < 5) return;
+    const improved = lowerIsBetter ? d < 0 : d > 0;
+    (improved ? good : bad).push(`${label}: ${fmt(prev)} → ${fmt(cur)} (${fmtDelta(d)}) nos últimos 7 dias vs 7 anteriores`);
+  };
+  judge("Leads", c7.crm.leads, p7s.crm.leads, (v) => fmtNum(v));
+  judge("Leads qualificados", c7.crm.qualified, p7s.crm.qualified, (v) => fmtNum(v));
+  judge("Clientes novos", c7.crm.newCustomers, p7s.crm.newCustomers, (v) => fmtNum(v));
+  judge("Receita atribuída", c7.crm.attributedRevenueCents, p7s.crm.attributedRevenueCents, (v) => fmtBRL(v));
+  judge("CPL", s7.cpl, p7.cpl, (v) => fmtBRL(v), true);
+  judge("CAC", s7.cac, p7.cac, (v) => fmtBRL(v), true);
+  judge("Taxa de fechamento", s7.closeRate, p7.closeRate, (v) => fmtPct(v), false);
+  judge("CTR", c7.platform.ctr, p7s.platform.ctr, (v) => fmtPct(v, 2));
+  for (const it of o.attention) {
+    if (it.severity === "OPORTUNIDADE") good.push(it.fact);
+    if (it.severity === "CRITICO" || it.severity === "ATENCAO") bad.push(it.fact);
+  }
+  const list = (items: string[], empty: string) => (items.length ? `<ul>${items.slice(0, 6).map((t) => `<li>${escapeHtml(t)}</li>`).join("")}</ul>` : `<p class="empty">${escapeHtml(empty)}</p>`);
+  const recs = o.attention.filter((a) => a.recommendation).map((a) => `${a.recommendation} (${a.fact})`);
+  const chans = bi.channels;
+  const topLeads = [...chans].sort((a, b) => b.crm.leads - a.crm.leads)[0];
+  const topCustomers = [...chans].filter((r) => r.crm.newCustomers > 0).sort((a, b) => b.crm.newCustomers - a.crm.newCustomers)[0];
+  const bestCost = [...chans].filter((r) => r.kpis.cac !== null).sort((a, b) => (a.kpis.cac as number) - (b.kpis.cac as number))[0];
+  const bestCpl = [...chans].filter((r) => r.kpis.cpl !== null).sort((a, b) => (a.kpis.cpl as number) - (b.kpis.cpl as number))[0];
+  const sourceFacts: string[] = [];
+  if (topLeads && topLeads.crm.leads > 0) sourceFacts.push(`Maior fonte de leads: ${SOURCE_LABELS[topLeads.source]} (${topLeads.crm.leads} leads no mês)`);
+  if (topCustomers) sourceFacts.push(`Maior fonte de clientes: ${SOURCE_LABELS[topCustomers.source]} (${topCustomers.crm.newCustomers} clientes)`);
+  if (bestCost) sourceFacts.push(`Melhor custo por cliente: ${SOURCE_LABELS[bestCost.source]} (CAC ${fmtBRL(bestCost.kpis.cac)})`);
+  if (bestCpl) sourceFacts.push(`Melhor custo por lead: ${SOURCE_LABELS[bestCpl.source]} (CPL ${fmtBRL(bestCpl.kpis.cpl)})`);
+  const cacAvg = c.kpis.cac;
+  const waste = bi.campaigns
+    .filter((r) => r.platform.hasSpendData && r.platform.spendCents > 0 && (r.crm.leads === 0 || (cacAvg !== null && r.kpis.cac !== null && r.kpis.cac > cacAvg * 1.5)))
+    .map((r) => (r.crm.leads === 0 ? `"${r.campaign.name}" investiu ${fmtBRL(r.platform.spendCents)} sem gerar lead` : `"${r.campaign.name}" tem CAC ${fmtBRL(r.kpis.cac)} — ${fmtDelta(deltaPercent(r.kpis.cac, cacAvg))} acima da média (${fmtBRL(cacAvg)})`));
+  const body = `${pageHead(`Inteligência — ${company.name}`, `Leitura gerencial · ${mesLabel} · ${o.projection.today} · comparações de 7 dias · gerada por regras, só com números do banco`)}
     ${o.notice ? `<p class="success">${escapeHtml(o.notice)}</p>` : ""}${o.error ? `<p class="error">${escapeHtml(o.error)}</p>` : ""}
     ${noIntegrationNotice(bi, o.role)}
+    <div class="exec-summary" style="margin-bottom:16px"><div class="eyebrow" style="margin-bottom:6px">Resumo executivo</div>${escapeHtml(o.summary)}<div class="small muted" style="margin-top:8px">Últimos 7 dias vs 7 anteriores — CPL ${money(s7.cpl)} (${fmtDelta(deltaPercent(s7.cpl, p7.cpl))}) · CAC ${money(s7.cac)} (${fmtDelta(deltaPercent(s7.cac, p7.cac))}) · fechamento ${fmtPct(s7.closeRate)} (${fmtDelta(deltaPercent(s7.closeRate, p7.closeRate))})</div></div>
     <div class="kpi-grid">
-      ${kpiCard({ label: "Investimento do mês", tooltip: "Gasto sincronizado das plataformas no mês corrente.", value: c.platform.hasSpendData ? fmtBRL(c.platform.spendCents) : "—", current: c.platform.hasSpendData ? c.platform.spendCents : null, previous: bi.previous.platform.hasSpendData ? bi.previous.platform.spendCents : null, lowerIsBetter: true, previousLabel: bi.period.previousLabel })}
-      ${kpiCard({ label: "Receita atribuída", tooltip: "Receita de vendas de contatos atribuídos a anúncios.", value: fmtBRL(c.crm.attributedRevenueCents), current: c.crm.attributedRevenueCents, previous: bi.previous.crm.attributedRevenueCents, previousLabel: bi.period.previousLabel })}
-      ${kpiCard({ label: "ROAS", tooltip: "Receita atribuída ÷ investimento.", value: c.kpis.roasCrm === null ? "—" : `${fmtNum(c.kpis.roasCrm)}x`, current: c.kpis.roasCrm, previous: bi.previous.kpis.roasCrm, previousLabel: bi.period.previousLabel })}
+      ${kpiCard({ label: "Investimento do mês", tooltip: "Gasto sincronizado das plataformas no mês corrente.", value: c.platform.hasSpendData ? fmtBRL(c.platform.spendCents) : "—", current: c.platform.hasSpendData ? c.platform.spendCents : null, previous: bi.previous.platform.hasSpendData ? bi.previous.platform.spendCents : null, lowerIsBetter: true, previousLabel: bi.period.previousLabel, hero: true })}
+      ${kpiCard({ label: "Receita atribuída", tooltip: "Receita de vendas de contatos atribuídos a anúncios.", value: fmtBRL(c.crm.attributedRevenueCents), current: c.crm.attributedRevenueCents, previous: bi.previous.crm.attributedRevenueCents, previousLabel: bi.period.previousLabel, hero: true })}
+      ${kpiCard({ label: "ROAS", tooltip: "Receita atribuída ÷ investimento.", value: c.kpis.roasCrm === null ? "—" : `${fmtNum(c.kpis.roasCrm)}x`, current: c.kpis.roasCrm, previous: bi.previous.kpis.roasCrm, previousLabel: bi.period.previousLabel, hero: true })}
+      ${kpiCard({ label: "CAC", tooltip: "Investimento ÷ clientes novos (mês).", value: money(c.kpis.cac), current: c.kpis.cac, previous: bi.previous.kpis.cac, lowerIsBetter: true, previousLabel: bi.period.previousLabel, hero: true })}
       ${kpiCard({ label: "Leads", tooltip: "Contatos novos no mês.", value: String(c.crm.leads), current: c.crm.leads, previous: bi.previous.crm.leads, previousLabel: bi.period.previousLabel })}
       ${kpiCard({ label: "Qualificados", tooltip: "Oportunidades qualificadas no mês.", value: String(c.crm.qualified), current: c.crm.qualified, previous: bi.previous.crm.qualified, previousLabel: bi.period.previousLabel })}
-      ${kpiCard({ label: "Agendamentos", tooltip: "Agendamentos no mês.", value: String(c.crm.appointments), current: c.crm.appointments, previous: bi.previous.crm.appointments, previousLabel: bi.period.previousLabel })}
-      ${kpiCard({ label: "Comparecimentos", tooltip: "Comparecimentos no mês.", value: String(c.crm.attendances), current: c.crm.attendances, previous: bi.previous.crm.attendances, previousLabel: bi.period.previousLabel })}
       ${kpiCard({ label: "Clientes novos", tooltip: "Contatos com venda concluída no mês.", value: String(c.crm.newCustomers), current: c.crm.newCustomers, previous: bi.previous.crm.newCustomers, previousLabel: bi.period.previousLabel })}
-      ${kpiCard({ label: "CAC", tooltip: "Investimento ÷ clientes novos (mês).", value: c.kpis.cac === null ? "—" : fmtBRL(c.kpis.cac), current: c.kpis.cac, previous: bi.previous.kpis.cac, lowerIsBetter: true, previousLabel: bi.period.previousLabel })}
-      ${kpiCard({ label: "Ticket médio", tooltip: "Receita ÷ vendas.", value: c.kpis.ticketCents === null ? "—" : fmtBRL(c.kpis.ticketCents), current: c.kpis.ticketCents, previous: bi.previous.kpis.ticketCents, previousLabel: bi.period.previousLabel })}
-      ${kpiCard({ label: "Meta atingida", tooltip: "Faturamento realizado ÷ meta de faturamento do mês.", value: o.projection.items[0].attainment === null ? "—" : fmtPct(o.projection.items[0].attainment, 1), current: null, previous: null, previousLabel: "" })}
-      ${kpiCard({ label: "Projeção do mês", tooltip: "Faturamento projetado mantendo o ritmo diário atual.", value: o.projection.items[0].projected === null ? "—" : fmtBRL(Math.round(o.projection.items[0].projected)), current: null, previous: null, previousLabel: "" })}
+      ${kpiCard({ label: "Ticket médio", tooltip: "Receita ÷ vendas.", value: money(c.kpis.ticketCents), current: c.kpis.ticketCents, previous: bi.previous.kpis.ticketCents, previousLabel: bi.period.previousLabel })}
+    </div>
+    <div class="insight-grid" style="margin-bottom:16px">
+      <div class="insight-card good"><h4>O que está funcionando</h4>${list(good, "Nenhuma melhora relevante (≥ 5%) nos últimos 7 dias, nem oportunidade detectada.")}</div>
+      <div class="insight-card bad"><h4>O que piorou</h4>${list(bad, "Nenhuma piora relevante (≥ 5%) nem alerta crítico nos últimos 7 dias.")}</div>
+      <div class="insight-card warn"><h4>Gargalos do funil</h4>${list(o.bottlenecks.map((b) => `${b.fact} — ${b.hypothesis}`), "Nenhum gargalo com amostra suficiente (mínimo de 10 na etapa de origem).")}</div>
+      <div class="insight-card info"><h4>Recomendações automáticas</h4>${list(recs, "Sem recomendação: nenhuma regra disparou com os dados atuais.")}</div>
+      <div class="insight-card"><h4>Fontes e custo por resultado</h4>${list(sourceFacts, "Sem leads no mês para apontar fontes.")}</div>
+      <div class="insight-card bad"><h4>Onde está desperdiçando dinheiro</h4>${list(waste, cacAvg === null && !bi.campaigns.some((r) => r.platform.spendCents > 0) ? "Sem investimento no mês." : "Nenhuma campanha gastando sem lead nem com CAC 50% acima da média.")}</div>
     </div>
     <div class="grid-12">
-      <div class="col-8"><div class="card-block"><h3>Meta do mês e projeção</h3>${goalsProgress(o.projection)}</div></div>
+      <div class="col-8"><div class="card-block">${chartHead("Comparativo Meta x Google", "mês atual · plataforma e CRM lado a lado")}${providerComparisonBlock(bi)}</div></div>
+      <div class="col-4"><div class="card-block">${chartHead("Radar de performance", "Meta x Google em taxas comparáveis")}${providerRadar(bi)}</div></div>
+    </div>
+    <div class="grid-12">
+      <div class="col-6"><div class="card-block">${chartHead("Comparação entre períodos", `${bi7.period.label} x ${bi7.period.previousLabel}`)}${periodComparisonTable(bi7)}</div></div>
+      <div class="col-6"><div class="card-block">${chartHead("Custo x qualidade por campanha", "regra: a campanha de menor CPL não é automaticamente a melhor")}<p style="font-size:13.5px;line-height:1.55;margin:0">${o.costQuality.text ? escapeHtml(o.costQuality.text) : '<span class="muted">Sem campanhas suficientes para comparar custo e qualidade.</span>'}</p>${o.costQuality.bestCac ? `<p class="small muted" style="margin-top:8px">Melhor CAC: ${escapeHtml(o.costQuality.bestCac.campaign.name)} (${fmtBRL(o.costQuality.bestCac.kpis.cac)})</p>` : ""}</div></div>
+    </div>
+    <div class="grid-12">
+      <div class="col-8"><div class="card-block">${chartHead("Meta do mês e projeção", `dia ${o.projection.daysElapsed} de ${o.projection.daysInMonth}`, `<a class="btn btn-small" href="/empresa/${company.id}/marketing/metas">Metas →</a>`)}${goalsProgress(o.projection)}</div></div>
       <div class="col-4"><div class="card-block">${chartHead("Saúde do marketing", `Índice de 0 a 100 · ${health.components.length} componentes ponderados`)}${healthHtml}</div></div>
     </div>
-    <div class="card-block"><h3>Resumo executivo</h3><p style="font-size:0.95rem;line-height:1.5">${escapeHtml(o.summary)}</p>
-      <p class="small muted">Últimos 7 dias vs 7 anteriores — CPL ${s7.cpl === null ? "—" : fmtBRL(s7.cpl)} (${fmtDelta(deltaPercent(s7.cpl, p7.cpl))}) · CAC ${s7.cac === null ? "—" : fmtBRL(s7.cac)} (${fmtDelta(deltaPercent(s7.cac, p7.cac))}) · fechamento ${fmtPct(s7.closeRate)} (${fmtDelta(deltaPercent(s7.closeRate, p7.closeRate))})</p></div>
-    <div class="card-block"><h3>Precisa de atenção</h3>${attentionBlock(o.attention)}</div>
+    <div class="card-block">${chartHead("Insights acionáveis", "todos os fatos por canal com a recomendação separada")}${attentionBlock(o.attention)}</div>
     <div class="grid-12">
       <div class="col-7 col-6"><div class="card-block">${chartHead("Funil executivo do mês", "Este mês · conversão etapa a etapa")}${funnelBlock(o.funnel, company.id, "")}</div></div>
-      <div class="col-6"><div class="card-block"><h3>Detector de gargalos</h3>${
-        o.bottlenecks.length
-          ? `<ul class="attention-list">${o.bottlenecks.map((b) => `<li style="grid-template-columns:1fr"><div class="fact">${escapeHtml(b.fact)}</div><div class="hyp">${escapeHtml(b.hypothesis)}</div></li>`).join("")}</ul>`
-          : '<p class="muted small">Nenhum gargalo detectado com amostra suficiente.</p>'
-      }${o.costQuality.text ? `<p class="small" style="margin-top:0.75rem;color:#fde68a"><strong>Custo x qualidade:</strong> ${escapeHtml(o.costQuality.text)}</p>` : ""}</div></div>
+      <div class="col-6"><div class="card-block">${chartHead("Horário de ouro", "conversas do mês por dia × hora")}${heatmapBlock(bi)}</div></div>
     </div>
-    <div class="card-block"><h3>Leads quentes agora</h3>${leadsTable(company.id, o.hot, company.timezone)}</div>
-    <div class="card-block"><h3>Oportunidades paradas</h3>${leadsTable(company.id, o.stalled.map((s) => s.lead), company.timezone, (l) => {
+    <div class="card-block">${chartHead("Leads quentes agora", "score determinístico por regras")}${leadsTable(company.id, o.hot, company.timezone)}</div>
+    <div class="card-block">${chartHead("Oportunidades paradas", "sem movimento no funil")}${leadsTable(company.id, o.stalled.map((s) => s.lead), company.timezone, (l) => {
       const st = o.stalled.find((s) => s.lead.contactId === l.contactId)!;
       return `${escapeHtml(st.reason)} <span class="muted">(${formatDuration(st.stalledForMs)}${l.opportunityValueCents ? ` · ${fmtBRL(l.opportunityValueCents)} em aberto` : ""})</span>`;
     })}</div>
     <div class="grid-12">
-      <div class="col-4"><div class="card-block"><h3>SLA de atendimento (mês)</h3>${slaHtml}</div></div>
-      <div class="col-8"><div class="card-block"><h3>Performance dos atendentes (mês)</h3>${attendantsHtml}</div></div>
+      <div class="col-4"><div class="card-block">${chartHead("SLA de atendimento", "mês atual")}${slaHtml}</div></div>
+      <div class="col-8"><div class="card-block">${chartHead("Performance dos atendentes", "mês atual")}${attendantsHtml}</div></div>
     </div>
-    ${matrixHtml ? `<div class="card-block"><h3>Atendente x origem (mês)</h3>${matrixHtml}</div>` : ""}
-    <div class="card-block"><h3>Metas da empresa</h3>${goalsForm(company.id, o.goals, o.role === "COMPANY_ADMIN")}</div>`;
+    ${matrixHtml ? `<div class="card-block">${chartHead("Atendente x origem", "leads/vendas e fechamento por origem")}${matrixHtml}</div>` : ""}`;
   return appShell({ company, user: o.user, role: o.role, active: "inteligencia", body, canViewMarketing: o.canViewMarketing });
 }
 
@@ -1205,6 +1328,318 @@ export function channelQuickLinks(basePath: string, bi: CompanyBi): string {
     return `<a href="${basePath}${queryString(bi.period, bi.filters, { canal: value })}" class="${active ? "active" : ""}">${label}</a>`;
   };
   return `<div class="seg-links">${link(null, "Todos os canais")}${link("META_ADS", "Meta Ads")}${link("GOOGLE_ADS", "Google Ads")}</div>`;
+}
+
+// --- v3: blocos premium (ranking, radar, heatmap, criativos, metas, saúde, comparação de períodos) --------
+
+/** Nota de "estrutura pronta, dado ainda não sincronizado" — nunca um número inventado. */
+export function prepNote(text: string): string {
+  return `<div class="prep-note">${escapeHtml(text)}</div>`;
+}
+
+/** Lista ranqueada com barra proporcional — usada para atendentes, campanhas, anúncios. */
+export function rankList(items: { name: string; value: number; label: string; sub?: string; href?: string }[], color = COLORS.accent, emptyText = "Sem dados neste período."): string {
+  const rows = items.filter((i) => i.value > 0);
+  if (rows.length === 0) return `<p class="muted small">${escapeHtml(emptyText)}</p>`;
+  const max = Math.max(...rows.map((i) => i.value));
+  return `<ol class="rank-list">${rows
+    .map((it, i) => `<li><span class="pos">${i + 1}</span><span class="name" title="${escapeHtml(it.name)}">${it.href ? `<a href="${escapeHtml(it.href)}">${escapeHtml(it.name)}</a>` : escapeHtml(it.name)}</span><span class="bar"><span style="width:${((it.value / max) * 100).toFixed(1)}%;background:${color}"></span></span><span class="val">${escapeHtml(it.label)}</span>${it.sub ? `<span class="sub">${escapeHtml(it.sub)}</span>` : ""}</li>`)
+    .join("")}</ol>`;
+}
+
+/** Campanhas com melhor e pior desempenho (regras explícitas: clientes/ROAS para melhor; investimento sem lead ou CPL acima da média para pior). */
+export function bestWorstCampaigns(rows: CampaignRow[], companyId: number, qs: string): { best: string; worst: string } {
+  const href = (r: CampaignRow) => `/empresa/${companyId}/marketing/campanhas/${r.campaign.id}${qs}`;
+  const best = [...rows]
+    .filter((r) => r.crm.newCustomers > 0 || r.crm.leads > 0)
+    .sort((a, b) => b.crm.newCustomers - a.crm.newCustomers || (b.kpis.roasCrm ?? 0) - (a.kpis.roasCrm ?? 0) || b.crm.leads - a.crm.leads)
+    .slice(0, 5)
+    .map((r) => ({ name: r.campaign.name, value: r.crm.newCustomers > 0 ? r.crm.newCustomers : r.crm.leads, label: r.crm.newCustomers > 0 ? `${r.crm.newCustomers} cliente(s)` : `${r.crm.leads} lead(s)`, sub: r.kpis.cac !== null ? `CAC ${fmtBRL(r.kpis.cac)}` : r.kpis.cpl !== null ? `CPL ${fmtBRL(r.kpis.cpl)}` : undefined, href: href(r) }));
+  const avgCpl = (() => {
+    const c = rows.filter((r) => r.kpis.cpl !== null);
+    return c.length ? c.reduce((s, r) => s + (r.kpis.cpl as number), 0) / c.length : null;
+  })();
+  const worst = [...rows]
+    .filter((r) => r.platform.hasSpendData && r.platform.spendCents > 0 && (r.crm.leads === 0 || (avgCpl !== null && (r.kpis.cpl ?? 0) > avgCpl * 1.3)))
+    .sort((a, b) => (b.crm.leads === 0 ? b.platform.spendCents : b.kpis.cpl ?? 0) - (a.crm.leads === 0 ? a.platform.spendCents : a.kpis.cpl ?? 0))
+    .slice(0, 5)
+    .map((r) => ({ name: r.campaign.name, value: r.crm.leads === 0 ? r.platform.spendCents : (r.kpis.cpl as number), label: r.crm.leads === 0 ? `${fmtBRL(r.platform.spendCents)} sem lead` : `CPL ${fmtBRL(r.kpis.cpl)}`, sub: r.crm.leads === 0 ? "0 leads" : `${r.crm.leads} lead(s)`, href: href(r) }));
+  return {
+    best: rankList(best, COLORS.positive, "Nenhuma campanha com lead ou cliente no período."),
+    worst: rankList(worst, COLORS.danger, avgCpl === null ? "Sem investimento no período para apontar desperdício." : "Nenhuma campanha gastando sem lead nem com CPL 30% acima da média — bom sinal."),
+  };
+}
+
+/** Radar Meta x Google sobre taxas comparáveis (cada eixo normalizado pelo maior valor entre os dois provedores). */
+export function providerRadar(bi: CompanyBi): string {
+  const meta = bi.providers.find((p) => p.provider === "META");
+  const g = bi.providers.find((p) => p.provider === "GOOGLE");
+  if (!meta || !g) return "";
+  const totalLeads = meta.crm.leads + g.crm.leads;
+  const axes = ["CTR", "Qualificação", "Agendamento", "Fechamento", "Participação nos leads"];
+  const raw = (p: ProviderComparison) => [p.connected ? p.platform.ctr : null, p.kpis.qualificationRate, p.kpis.appointmentRate, p.kpis.closeRate, totalLeads > 0 ? p.crm.leads / totalLeads : null];
+  const rm = raw(meta);
+  const rg = raw(g);
+  const norm = (i: number, v: number | null) => {
+    if (v === null) return null;
+    const m = Math.max(rm[i] ?? 0, rg[i] ?? 0);
+    return m > 0 ? v / m : 0;
+  };
+  return radarChart({
+    axes,
+    series: [
+      { name: "Meta Ads", color: COLORS.meta, values: rm.map((v, i) => norm(i, v)) },
+      { name: "Google Ads", color: COLORS.google, values: rg.map((v, i) => norm(i, v)) },
+    ],
+    ariaLabel: "Radar de performance Meta Ads x Google Ads",
+    note: "cada eixo = valor ÷ maior valor entre os dois provedores (100% = o melhor dos dois)",
+  });
+}
+
+/** Horário de ouro — conversas reais por dia da semana × hora. */
+export function heatmapBlock(bi: CompanyBi): string {
+  const h = bi.heatmap;
+  const days = ["Seg", "Ter", "Qua", "Qui", "Sex", "Sáb", "Dom"];
+  const cols = Array.from({ length: 24 }, (_, i) => `${i}h`);
+  const chart = heatmapChart({ rows: days, cols, values: h.cells, format: (v) => `${fmtNum(v)} conversa(s)`, ariaLabel: "Conversas por dia da semana e hora", emptyMessage: "Sem conversas no período para desenhar o horário de ouro." });
+  const best = h.bestHour === null ? "" : `<div class="status-item" style="margin-top:10px"><div class="k">Seu melhor horário</div><div class="v">${h.bestHour}h – ${(h.bestHour + 1) % 24}h <span class="muted small">· ${fmtPct(h.bestShare)} das conversas</span></div></div>`;
+  return `${chart}${best}`;
+}
+
+/** Cartão de criativo (anúncio): prévia por iniciais (imagem não sincronizada), provedor, campanha, resultados reais do CRM. */
+export function creativeCard(c: CreativeRow, companyId: number, qs: string): string {
+  const initials = c.ad.name.split(/\s+/).slice(0, 2).map((w) => w.charAt(0).toUpperCase()).join("");
+  const money = (v: number | null) => (v === null ? "—" : fmtBRL(v));
+  const status = (c.ad.status ?? "").toUpperCase();
+  const chip = status === "ACTIVE" || status === "ENABLED" ? '<span class="chip chip-ok chip-xs">Ativo</span>' : status === "PAUSED" ? '<span class="chip chip-warn chip-xs">Pausado</span>' : status ? `<span class="chip chip-muted chip-xs">${escapeHtml(status.toLowerCase())}</span>` : "";
+  return `<div class="creative-card">
+    <div class="creative-preview">${chip}<span class="initials">${escapeHtml(initials || "AD")}</span><span>prévia não sincronizada</span></div>
+    <div class="creative-body">
+      <h4 title="${escapeHtml(c.ad.name)}">${escapeHtml(c.ad.name)}</h4>
+      <div class="small muted" style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">${providerChip(c.ad.provider)}<a href="/empresa/${companyId}/marketing/campanhas/${c.ad.campaign_id}${qs}" class="muted">${escapeHtml(c.campaignName)}</a></div>
+      <div class="creative-stats">
+        <div>Leads<b>${c.leads}</b></div>
+        <div>Clientes<b>${c.customers}</b></div>
+        <div>Receita<b>${fmtBRL(c.revenueCents)}</b></div>
+        <div>Investimento<b>${c.hasMediaData ? fmtBRL(c.platform.spendCents) : "—"}</b></div>
+        <div>CTR<b>${c.hasMediaData ? fmtPct(c.platform.ctr, 2) : "—"}</b></div>
+        <div>CPL<b>${c.hasMediaData ? money(c.cpl) : "—"}</b></div>
+      </div>
+    </div>
+  </div>`;
+}
+
+/** Cartão de meta: valor, alvo, progresso, faltante, ritmo necessário e projeção. */
+export function goalCard(item: GoalProgress, daysRemaining: number): string {
+  const f = (n: number | null) => (n === null ? "—" : item.isCurrency ? fmtBRL(Math.round(n)) : fmtNum(Math.round(n)));
+  const pct = item.attainment;
+  const gapCls = item.projectedGap === null ? "" : item.projectedGap >= 0 ? "chip-ok" : "chip-warn";
+  return `<div class="goal-card">
+    <div class="goal-head"><span class="eyebrow">${escapeHtml(item.label)}</span>${pct !== null ? `<span class="chip ${pct >= 1 ? "chip-ok" : pct >= 0.6 ? "chip-warn" : "chip-bad"} chip-xs">${fmtPct(pct, 0)} atingido</span>` : '<span class="chip chip-muted chip-xs">sem meta</span>'}</div>
+    <div class="goal-value">${f(item.actual)}</div>
+    <div class="goal-target">${item.goal === null ? "Defina a meta abaixo para acompanhar." : `meta ${f(item.goal)}`}</div>
+    ${progressBar(pct)}
+    <div class="goal-meta">
+      <span>Faltam <b>${f(item.remaining)}</b></span>
+      <span>Ritmo necessário <b>${item.neededPerDay === null ? "—" : `${f(item.neededPerDay)}/dia`}</b></span>
+      <span>Projeção do mês <b>${f(item.projected)}</b></span>
+      <span>Vs meta ${item.projectedGap === null ? "<b>—</b>" : `<span class="chip ${gapCls} chip-xs">${item.projectedGap >= 0 ? "+" : ""}${f(item.projectedGap)}</span>`}</span>
+    </div>
+    ${daysRemaining >= 0 ? "" : ""}
+  </div>`;
+}
+
+/** Comparação de períodos (atual x anterior) — mesmas fórmulas do relatório. */
+export function periodComparisonTable(bi: CompanyBi): string {
+  const c = bi.current;
+  const p = bi.previous;
+  const money = (v: number | null) => (v === null ? "—" : fmtBRL(v));
+  const rows: [string, string, string, number | null][] = [
+    ["Investimento", c.platform.hasSpendData ? fmtBRL(c.platform.spendCents) : "—", p.platform.hasSpendData ? fmtBRL(p.platform.spendCents) : "—", deltaPercent(c.platform.hasSpendData ? c.platform.spendCents : null, p.platform.hasSpendData ? p.platform.spendCents : null)],
+    ["Impressões", c.platform.impressions === null ? "—" : fmtNum(c.platform.impressions), p.platform.impressions === null ? "—" : fmtNum(p.platform.impressions), deltaPercent(c.platform.impressions, p.platform.impressions)],
+    ["Cliques", c.platform.clicks === null ? "—" : fmtNum(c.platform.clicks), p.platform.clicks === null ? "—" : fmtNum(p.platform.clicks), deltaPercent(c.platform.clicks, p.platform.clicks)],
+    ["CTR", fmtPct(c.platform.ctr, 2), fmtPct(p.platform.ctr, 2), deltaPercent(c.platform.ctr, p.platform.ctr)],
+    ["Leads", String(c.crm.leads), String(p.crm.leads), deltaPercent(c.crm.leads, p.crm.leads)],
+    ["Qualificados", String(c.crm.qualified), String(p.crm.qualified), deltaPercent(c.crm.qualified, p.crm.qualified)],
+    ["Clientes novos", String(c.crm.newCustomers), String(p.crm.newCustomers), deltaPercent(c.crm.newCustomers, p.crm.newCustomers)],
+    ["Receita atribuída", fmtBRL(c.crm.attributedRevenueCents), fmtBRL(p.crm.attributedRevenueCents), deltaPercent(c.crm.attributedRevenueCents, p.crm.attributedRevenueCents)],
+    ["CPL", money(c.kpis.cpl), money(p.kpis.cpl), deltaPercent(c.kpis.cpl, p.kpis.cpl)],
+    ["CAC", money(c.kpis.cac), money(p.kpis.cac), deltaPercent(c.kpis.cac, p.kpis.cac)],
+    ["ROAS", c.kpis.roasCrm === null ? "—" : `${fmtNum(c.kpis.roasCrm)}x`, p.kpis.roasCrm === null ? "—" : `${fmtNum(p.kpis.roasCrm)}x`, deltaPercent(c.kpis.roasCrm, p.kpis.roasCrm)],
+  ];
+  return `<div class="data-table-wrap"><table class="compare-table"><thead><tr><th>Métrica</th><th>${escapeHtml(bi.period.label)}</th><th>${escapeHtml(bi.period.previousLabel)}</th><th>Variação</th></tr></thead><tbody>${rows
+    .map(([l, a, b, d]) => `<tr><td>${l}</td><td>${a}</td><td>${b}</td><td class="${d === null ? "na" : ""}">${fmtDelta(d)}</td></tr>`)
+    .join("")}</tbody></table></div>`;
+}
+
+/** Saúde da conta de um provedor: conta, status da conexão, sincronização, alertas — só fatos. */
+export function providerHealthGrid(accounts: MarketingAccountWithConnection[], provider: MarketingProvider, freshnessAt: string | null, attention: AttentionItem[], period: string): string {
+  const mine = accounts.filter((a) => a.provider === provider);
+  const fresh = freshnessLabel(freshnessAt);
+  const alerts = attention.filter((a) => a.channel === provider || (a.channel === "INTEGRACAO" && a.fact.startsWith(PROVIDER_LABELS[provider])));
+  const critical = alerts.filter((a) => a.severity === "CRITICO").length;
+  const status = mine.length === 0 ? '<span class="chip chip-muted">Não conectado</span>' : mine.every((a) => a.connection_status === "CONECTADA") ? '<span class="chip chip-ok">Conectado</span>' : '<span class="chip chip-bad">Reconexão necessária</span>';
+  const sync = mine.length === 0 ? "—" : mine.every((a) => a.sync_enabled) ? '<span class="chip chip-ok chip-xs">ativa</span>' : '<span class="chip chip-warn chip-xs">desligada em alguma conta</span>';
+  return `<div class="status-grid">
+    <div class="status-item"><div class="k">Conta conectada</div><div class="v">${mine.length ? mine.map((a) => escapeHtml(a.name ?? a.external_account_id)).join(", ") : "—"}</div></div>
+    <div class="status-item"><div class="k">Status da conta</div><div class="v">${status}</div></div>
+    <div class="status-item"><div class="k">Sincronização</div><div class="v">${sync} <span class="freshness ${fresh.cls}"><span class="dot"></span>${escapeHtml(fresh.text)}</span></div></div>
+    <div class="status-item"><div class="k">Período analisado</div><div class="v">${escapeHtml(period)}${alerts.length ? ` <span class="chip ${critical ? "chip-bad" : "chip-warn"} chip-xs">${alerts.length} alerta(s)</span>` : ' <span class="chip chip-ok chip-xs">sem alertas</span>'}</div></div>
+  </div>`;
+}
+
+/** Metas do mês em versão compacta (para visão geral e dashboard). */
+export function goalsMini(projection: MonthProjection | null, companyId: number): string {
+  if (!projection) return "";
+  const items = projection.items.filter((i) => i.goal !== null).slice(0, 4);
+  if (items.length === 0) return `<p class="muted small">Nenhuma meta definida. <a href="/empresa/${companyId}/marketing/metas">Definir metas do mês →</a></p>`;
+  return `<div class="goal-cards" style="grid-template-columns:repeat(${Math.min(4, items.length)},minmax(0,1fr))">${items.map((i) => goalCard(i, projection.daysRemaining)).join("")}</div>`;
+}
+
+/**
+ * Blocos consolidados de mídia para o Dashboard geral da empresa (Meta + Google + CRM). Renderizado pelo
+ * servidor só para quem pode ver marketing; os blocos operacionais do dashboard continuam abaixo.
+ */
+export function dashboardMarketingBlocks(bi: CompanyBi, funnel: FunnelStage[], accounts: MarketingAccountWithConnection[], projection: MonthProjection | null, role: Role, isPlatformAdmin: boolean, provenance: DataProvenance, companyId: number, ops: { waitingNow: number; avgFirstResponseMinutes: number | null; withinSlaPercent: number | null; slaTargetMinutes: number; opportunitiesCreated: number }): string {
+  const c = bi.current;
+  const p = bi.previous;
+  const prev = bi.period.previousLabel;
+  const hybrid = isHybrid(provenance);
+  const qs = queryString(bi.period, bi.filters);
+  const spark = (pick: (d: DailyPoint) => number | null) => bi.daily.map(pick);
+  const spendOf = (s: PeriodSnapshot) => (s.platform.hasSpendData ? s.platform.spendCents : null);
+  const prov = (k: MarketingProvider) => bi.providers.find((x) => x.provider === k);
+  const provSpend = (k: MarketingProvider) => {
+    const x = prov(k);
+    return x && x.connected && x.platform.hasSpendData ? x.platform.spendCents : null;
+  };
+  const money = (v: number | null) => (v === null ? "—" : fmtBRL(v));
+  const card = (label: string, tooltip: string, value: string, cur: number | null, prevV: number | null, extra: Partial<Parameters<typeof kpiCard>[0]> = {}) =>
+    kpiCard({ label, tooltip, value, current: cur, previous: prevV, previousLabel: prev, ...extra });
+  const funnelConv = ratio(c.crm.newCustomers, c.crm.leads);
+  const prevFunnelConv = ratio(p.crm.newCustomers, p.crm.leads);
+  const kpis = `<div class="kpi-grid">
+    ${card("Investimento total", "Meta Ads + Google Ads no período.", money(spendOf(c)), spendOf(c), spendOf(p), { lowerIsBetter: true, spark: spark((d) => d.spendCents), bars: true, hero: true })}
+    ${card("Investimento Meta", prov("META")?.connected ? "Gasto reportado pela Meta." : "Meta Ads não conectado.", money(provSpend("META")), provSpend("META"), null, { lowerIsBetter: true, spark: bi.dailyByProvider.META.map((d) => d.spendCents), sparkColor: COLORS.meta, bars: true })}
+    ${card("Investimento Google", prov("GOOGLE")?.connected ? "Gasto reportado pelo Google." : "Google Ads não conectado.", money(provSpend("GOOGLE")), provSpend("GOOGLE"), null, { lowerIsBetter: true, spark: bi.dailyByProvider.GOOGLE.map((d) => d.spendCents), sparkColor: COLORS.google, bars: true })}
+    ${card("Leads gerados", "Contatos novos no CRM.", String(c.crm.leads), c.crm.leads, p.crm.leads, { spark: spark((d) => d.leads), sparkColor: COLORS.purple, bars: true })}
+    ${card("Leads qualificados", "Oportunidades que chegaram a uma etapa 'qualificado'.", String(c.crm.qualified), c.crm.qualified, p.crm.qualified, { spark: spark((d) => d.qualified), sparkColor: COLORS.purple, bars: true })}
+    ${card("Agendamentos", "Oportunidades com agendamento no período.", String(c.crm.appointments), c.crm.appointments, p.crm.appointments)}
+    ${card("Comparecimentos", "Oportunidades marcadas como 'compareceu'.", String(c.crm.attendances), c.crm.attendances, p.crm.attendances)}
+    ${card("Clientes gerados", "Contatos distintos com venda concluída.", String(c.crm.newCustomers), c.crm.newCustomers, p.crm.newCustomers, { spark: spark((d) => d.sales), sparkColor: COLORS.positive, bars: true })}
+    ${card("Receita atribuída", "Receita das vendas de contatos atribuídos a anúncios.", fmtBRL(c.crm.attributedRevenueCents), c.crm.attributedRevenueCents, p.crm.attributedRevenueCents, { spark: spark((d) => d.revenueCents), sparkColor: COLORS.positive, bars: true, hybrid })}
+    ${card("CAC", "Investimento ÷ clientes novos.", money(c.kpis.cac), c.kpis.cac, p.kpis.cac, { lowerIsBetter: true, hybrid })}
+    ${card("CPL", "Investimento ÷ leads.", money(c.kpis.cpl), c.kpis.cpl, p.kpis.cpl, { lowerIsBetter: true, hybrid })}
+    ${card("ROAS", "Receita atribuída ÷ investimento.", c.kpis.roasCrm === null ? "—" : `${fmtNum(c.kpis.roasCrm)}x`, c.kpis.roasCrm, p.kpis.roasCrm, { spark: spark((d) => d.roas), bars: true, hybrid })}
+    ${card("Conversão do funil", "Clientes novos ÷ leads no período.", fmtPct(funnelConv, 1), funnelConv, prevFunnelConv, { secondary: true })}
+    ${card("Tempo médio de resposta", "Média da 1ª resposta humana (atendimentos concluídos no período).", ops.avgFirstResponseMinutes === null ? "—" : formatDuration(ops.avgFirstResponseMinutes * 60000), null, null, { secondary: true })}
+    ${card("Aguardando humano", "Conversas com espera aberta agora (não filtra por período).", String(ops.waitingNow), null, null, { secondary: true })}
+    ${card("Oportunidades criadas", "Oportunidades abertas no CRM no período.", String(ops.opportunitiesCreated), null, null, { secondary: true })}
+  </div>`;
+  const attendants = rankList(
+    bi.attendants.map((a) => ({ name: a.name, value: a.leads, label: `${a.leads} leads`, sub: a.sales ? `${a.sales} venda(s)` : undefined })).sort((a, b) => b.value - a.value).slice(0, 6),
+    COLORS.accent,
+    "Sem leads por atendente no período."
+  );
+  const withinSla = ops.withinSlaPercent;
+  const donut = withinSla === null
+    ? emptyChart("Sem atendimentos concluídos no período.")
+    : donutChart({ items: [{ label: "No prazo", value: Math.round(withinSla), color: COLORS.positive }, { label: "Fora do prazo", value: Math.round(100 - withinSla), color: COLORS.grid === "#232330" ? "#3a3a4a" : COLORS.muted }], format: (v) => `${fmtNum(v)}%`, centerLabel: "no prazo", ariaLabel: "1ª resposta dentro do prazo" });
+  const bestWorst = bestWorstCampaigns(bi.campaigns, companyId, qs);
+  return `${provenanceStrip(provenance, bi.providers)}
+    ${kpis}
+    <div class="grid-12">
+      <div class="col-7">${masterProviderChart(bi, `/empresa/${companyId}/dashboard`, qs, "investimento")}</div>
+      <div class="col-5"><div class="card-block">${chartHead("Funil de aquisição", "do anúncio à venda", `<a class="small" href="/empresa/${companyId}/marketing/funil${qs}">Ver detalhes →</a>`)}${funnelBlock(funnel, companyId, qs)}</div></div>
+    </div>
+    <div class="grid-12">
+      <div class="col-4"><div class="card-block">${chartHead("Leads por atendente", bi.period.label, `<a class="small" href="/empresa/${companyId}/inteligencia">Ver todos →</a>`)}${attendants}</div></div>
+      <div class="col-4"><div class="card-block">${chartHead("Horário de ouro", "conversas por dia da semana × hora")}${heatmapBlock(bi)}</div></div>
+      <div class="col-4"><div class="card-block">${chartHead("Conversas e atendimento", `meta de 1ª resposta: ${ops.slaTargetMinutes} min`, `<a class="small" href="/empresa/${companyId}/conversas">Ver conversas →</a>`)}${donut}
+        <div class="status-grid" style="grid-template-columns:1fr 1fr 1fr;margin-top:12px"><div class="status-item"><div class="k">Conversas</div><div class="v">${c.crm.conversations}</div></div><div class="status-item"><div class="k">Aguardando humano</div><div class="v" style="color:${ops.waitingNow ? "var(--accent)" : "inherit"}">${ops.waitingNow}</div></div><div class="status-item"><div class="k">1ª resposta (média)</div><div class="v">${ops.avgFirstResponseMinutes === null ? "—" : formatDuration(ops.avgFirstResponseMinutes * 60000)}</div></div></div></div></div>
+    </div>
+    <div class="grid-12">
+      <div class="col-4"><div class="card-block">${chartHead("Contas conectadas", "status por provedor", isPlatformAdmin ? `<a class="small" href="/admin/integracoes">Gerenciar →</a>` : "")}${integrationsBlock(accounts, "", role, isPlatformAdmin).replace('class="integration-cards"', 'class="integration-cards" style="grid-template-columns:1fr"')}</div></div>
+      <div class="col-4"><div class="card-block">${chartHead("Por origem", "leads por canal de origem")}${channelChart(bi, "leads")}</div></div>
+      <div class="col-4"><div class="card-block">${chartHead("Campanhas com melhor desempenho", "clientes gerados; desempate por ROAS")}${bestWorst.best}</div></div>
+    </div>
+    <div class="grid-12">
+      <div class="col-6"><div class="card-block">${chartHead("Campanhas que pedem atenção", "investimento sem lead ou CPL 30% acima da média")}${bestWorst.worst}</div></div>
+      <div class="col-6"><div class="card-block">${chartHead("Metas do mês", projection ? `dia ${projection.daysElapsed} de ${projection.daysInMonth}` : "", `<a class="small" href="/empresa/${companyId}/marketing/metas">Gerenciar →</a>`)}${goalsMini(projection, companyId).replace("grid-template-columns:repeat(4,minmax(0,1fr))", "grid-template-columns:repeat(2,minmax(0,1fr))")}</div></div>
+    </div>
+    <div class="card-block">${chartHead("Campanhas em destaque", `${bi.period.label} · maiores por investimento`, `<a class="btn btn-small" href="/empresa/${companyId}/marketing/campanhas${qs}">Ver todas →</a>`)}${campaignsTable(bi.campaigns.slice(0, 6), companyId, qs, "America/Sao_Paulo", null)}</div>`;
+}
+
+// --- Página: Metas ----------------------------------------------------------------------
+
+export function goalsPage(base: MarketingPageBase, goals: CompanyGoals | null, projection: MonthProjection, notice?: string, error?: string): string {
+  const { company } = base;
+  const canEdit = base.role === "COMPANY_ADMIN";
+  const gauge = (item: GoalProgress) => {
+    const pct = item.attainment === null ? null : Math.min(100, item.attainment * 100);
+    const color = pct === null ? COLORS.neutral : pct >= 100 ? COLORS.positive : pct >= 60 ? COLORS.accent : COLORS.warning;
+    return `<div class="card-block" style="text-align:center">${chartHead(item.label, item.goal === null ? "sem meta definida" : `meta ${item.isCurrency ? fmtBRL(item.goal) : fmtNum(item.goal)}`)}${gaugeChart({ value: pct, max: 100, color, statusLabel: pct === null ? "sem meta" : `${pct.toFixed(0)}% atingido`, ariaLabel: `${item.label}: ${pct === null ? "sem meta" : `${pct.toFixed(0)}% da meta`}` })}<div class="small muted">realizado ${item.isCurrency ? fmtBRL(Math.round(item.actual)) : fmtNum(item.actual)}${item.projected !== null ? ` · projeção ${item.isCurrency ? fmtBRL(Math.round(item.projected)) : fmtNum(Math.round(item.projected))}` : ""}</div></div>`;
+  };
+  const gauges = projection.items.slice(0, 3).map(gauge).join("");
+  const cards = projection.items.map((i) => goalCard(i, projection.daysRemaining)).join("");
+  const c = base.bi.current;
+  const cplGoal = goals?.max_cpl_cents ?? null;
+  const cacGoal = goals?.max_cac_cents ?? null;
+  const roasGoal = goals?.min_roas ?? null;
+  const limitRow = (label: string, actual: number | null, goal: number | null, fmt: (v: number) => string, lowerIsBetter: boolean) => {
+    const ok = actual === null || goal === null ? null : lowerIsBetter ? actual <= goal : actual >= goal;
+    return `<div class="status-item"><div class="k">${escapeHtml(label)}</div><div class="v">${actual === null ? "—" : fmt(actual)} <span class="muted small">/ ${goal === null ? "sem limite" : `${lowerIsBetter ? "máx." : "mín."} ${fmt(goal)}`}</span>${ok === null ? "" : `<span class="chip ${ok ? "chip-ok" : "chip-bad"} chip-xs">${ok ? "dentro" : "fora"}</span>`}</div></div>`;
+  };
+  const body = `${pageHead(`Metas — ${company.name}`, `Mês atual · dia ${projection.daysElapsed} de ${projection.daysInMonth} · ${projection.daysRemaining} dia(s) restantes · projeção linear (ritmo diário atual × dias do mês)`)}
+    ${notice ? `<p class="success">${escapeHtml(notice)}</p>` : ""}${error ? `<p class="error">${escapeHtml(error)}</p>` : ""}
+    ${projection.headline ? `<div class="exec-summary" style="margin-bottom:16px">${escapeHtml(projection.headline)}</div>` : ""}
+    <div class="grid-12"><div class="col-4">${gauges.split("</div><div class=\"card-block\"").join("</div></div><div class=\"col-4\"><div class=\"card-block\"")}</div></div>
+    <div class="card-block">${chartHead("Meta x realizado", "progresso, faltante, ritmo necessário e projeção até o fim do mês")}<div class="goal-cards">${cards}</div></div>
+    <div class="card-block">${chartHead("Limites de eficiência", "CPL, CAC e ROAS do mês contra os limites definidos")}<div class="status-grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">
+      ${limitRow("CPL", c.kpis.cpl, cplGoal, (v) => fmtBRL(v), true)}${limitRow("CAC", c.kpis.cac, cacGoal, (v) => fmtBRL(v), true)}${limitRow("ROAS", c.kpis.roasCrm, roasGoal, (v) => `${fmtNum(v)}x`, false)}
+    </div></div>
+    <div class="card-block">${chartHead("Definir metas do mês", canEdit ? "salvas por empresa; valem para o mês corrente" : "somente o administrador da empresa edita")}${goalsForm(company.id, goals, canEdit)}</div>`;
+  return shellFor(base, "marketing/metas", body);
+}
+
+// --- Página: Conteúdo / Criativos ---------------------------------------------------------
+
+export function creativesPage(base: MarketingPageBase): string {
+  const { company, bi } = base;
+  const qs = queryString(bi.period, bi.filters);
+  const basePath = `/empresa/${company.id}/marketing/criativos`;
+  const creatives = bi.creatives;
+  const withMedia = creatives.filter((c) => c.hasMediaData);
+  const head = `${pageHead(`Conteúdo / Criativos — ${company.name}`, `${bi.period.label} · anúncios sincronizados com resultados reais do CRM por anúncio`)}
+    ${filterBar(basePath, bi.period, bi.filters, base.filterOptions, freshnessLabel(bi.freshness.lastSuccessAt))}`;
+  if (creatives.length === 0) {
+    return shellFor(base, "marketing/criativos", `${head}<div class="empty-state"><span class="es-icon"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="2"/><path d="m21 16-5-5-8 8"/></svg></span><h2>Nenhum anúncio sincronizado ainda</h2><p>Os criativos aparecem aqui assim que uma conta Meta Ads for vinculada e sincronizada (a Meta envia campanha → conjunto → anúncio). Google Ads não expõe anúncios pela sincronização atual.</p></div>`);
+  }
+  const ranking = rankList(
+    creatives.slice(0, 8).map((c) => ({ name: c.ad.name, value: c.leads, label: `${c.leads} leads`, sub: c.customers ? `${c.customers} cliente(s)` : undefined, href: `/empresa/${company.id}/marketing/campanhas/${c.ad.campaign_id}${qs}` })),
+    COLORS.accent,
+    "Nenhum lead atribuído a anúncio no período."
+  );
+  const byCtr = withMedia.filter((c) => c.platform.ctr !== null).sort((a, b) => (b.platform.ctr ?? 0) - (a.platform.ctr ?? 0));
+  const best = byCtr[0];
+  const worst = byCtr.length > 1 ? byCtr[byCtr.length - 1] : null;
+  const mediaNote = withMedia.length === 0
+    ? prepNote("Métricas de mídia por anúncio (alcance, cliques, CTR, CPL, engajamento) e o formato (imagem, vídeo, reels, stories, feed) ainda não são sincronizados — a coleta atual grava métricas no nível da campanha. A estrutura já lê o nível 'anúncio' quando a sincronização passar a gravá-lo; até lá estes campos ficam em '—'. Leads, clientes e receita por anúncio já são reais (atribuição por ad id).")
+    : "";
+  const compare = withMedia.length
+    ? `<div class="data-table-wrap"><table class="compare-table"><thead><tr><th>Anúncio</th><th>Investimento</th><th>Alcance</th><th>Cliques</th><th>CTR</th><th>Leads</th><th>CPL</th></tr></thead><tbody>${withMedia
+        .map((c) => `<tr><td>${escapeHtml(c.ad.name)}</td><td>${fmtBRL(c.platform.spendCents)}</td><td>${c.platform.reach === null ? "—" : fmtNum(c.platform.reach)}</td><td>${c.platform.clicks === null ? "—" : fmtNum(c.platform.clicks)}</td><td>${fmtPct(c.platform.ctr, 2)}</td><td>${c.leads}</td><td>${c.cpl === null ? "—" : fmtBRL(c.cpl)}</td></tr>`)
+        .join("")}</tbody></table></div>`
+    : "";
+  const body = `${head}
+    ${mediaNote}
+    <div class="grid-12">
+      <div class="col-8"><div class="card-block">${chartHead("Ranking dos melhores", "por leads atribuídos ao anúncio (dado real do CRM)")}${ranking}</div></div>
+      <div class="col-4"><div class="card-block">${chartHead("Melhor e pior criativo", withMedia.length ? "por CTR (mídia sincronizada)" : "aguardando métricas de mídia por anúncio")}${best ? `<div class="status-item"><div class="k">Melhor CTR</div><div class="v">${escapeHtml(best.ad.name)} · ${fmtPct(best.platform.ctr, 2)}</div></div>` : ""}${worst ? `<div class="status-item" style="margin-top:8px"><div class="k">Pior CTR</div><div class="v">${escapeHtml(worst.ad.name)} · ${fmtPct(worst.platform.ctr, 2)}</div></div>` : ""}${!best ? '<p class="muted small">Sem métricas de mídia por anúncio no período.</p>' : ""}</div></div>
+    </div>
+    <div class="card-block">${chartHead("Grid de criativos", `${creatives.length} anúncio(s) · prévia visual ainda não sincronizada (iniciais no lugar da imagem)`)}<div class="creative-grid">${creatives.map((c) => creativeCard(c, company.id, qs)).join("")}</div></div>
+    ${compare ? `<div class="card-block">${chartHead("Comparação entre criativos", "só anúncios com métricas de mídia")}${compare}</div>` : ""}`;
+  return shellFor(base, "marketing/criativos", body);
 }
 
 export type { PeriodSnapshot };

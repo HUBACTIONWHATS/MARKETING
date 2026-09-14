@@ -22,6 +22,8 @@ import { recordConversionEvent } from "./conversionFeedback";
 import { csrfMiddleware } from "./csrf";
 import { decryptSecret, isCredentialEncryptionConfigured } from "./credentialCrypto";
 import {
+  type MonthProjection,
+  type CompanyGoals,
   channelCostQuality,
   buildAttention,
   costVsQuality,
@@ -76,6 +78,9 @@ import {
   type CompanySummary,
 } from "./viewsAdminMarketing";
 import {
+  dashboardMarketingBlocks,
+  creativesPage,
+  goalsPage,
   type DataProvenance,
   alertsPage,
   attentionBlock,
@@ -1315,6 +1320,22 @@ app.get("/empresa/:companyId/dashboard", requireCompanyAccess, async (req, res) 
     attendantUserId,
   });
 
+  // Visão consolidada de mídia (Meta + Google + CRM) — mesma regra de acesso do menu Marketing.
+  let marketingHtml: string | undefined;
+  if (canViewMarketing(res)) {
+    const period = resolvePeriod("personalizado", { from, to }, company.timezone);
+    const bi = await computeCompanyBi(company.id, company.timezone, period, { ...EMPTY_FILTERS, attendantUserId });
+    const accounts = await listAccountsForCompany(company.id);
+    const { projection } = await monthProjectionFor(company);
+    marketingHtml = dashboardMarketingBlocks(bi, executiveFunnel(bi.current), accounts, projection, res.locals.membership.role, Number(res.locals.user.is_platform_admin) === 1, dataProvenance(company, accounts), company.id, {
+      waitingNow: data.waitingNow,
+      avgFirstResponseMinutes: data.firstResponse.avgMinutes,
+      withinSlaPercent: data.firstResponse.withinSlaPercent,
+      slaTargetMinutes: data.slaTargetMinutes,
+      opportunitiesCreated: data.opportunitiesCreated,
+    });
+  }
+
   res.send(
     dashboardPage({
       company,
@@ -1322,6 +1343,7 @@ app.get("/empresa/:companyId/dashboard", requireCompanyAccess, async (req, res) 
       role: res.locals.membership.role,
       isDev: DEMO_MODE,
       canEditSla: res.locals.membership.role === "COMPANY_ADMIN",
+      marketingHtml,
       members: await listCompanyMembers(company.id),
       filters: { from, to, attendantUserId },
       data,
@@ -1409,6 +1431,7 @@ async function marketingContext(req: express.Request, res: express.Response, for
   const members = await listCompanyMembers(company.id);
   const stages = await listStages(company.id);
   const accounts = await listAccountsForCompany(company.id);
+  const campaigns = await listCampaignsForCompany(company.id);
   const masterMetric = q.m && /^[a-z]+$/.test(q.m) ? q.m : "investimento";
   const channelMetric = q.canalMetrica && /^[a-z]+$/.test(q.canalMetrica) ? q.canalMetrica : "leads";
   return {
@@ -1422,7 +1445,7 @@ async function marketingContext(req: express.Request, res: express.Response, for
     masterMetric,
     channelMetric,
     bi,
-    filterOptions: { campaigns: await listCampaignsForCompany(company.id), members, stages },
+    filterOptions: { campaigns, members, stages, accounts, objectives: [...new Set(campaigns.map((c) => c.objective ?? c.campaign_type ?? "").filter((o) => o))].sort() },
     m1,
     m2,
     sort,
@@ -1432,10 +1455,30 @@ async function marketingContext(req: express.Request, res: express.Response, for
   };
 }
 
+async function monthProjectionFor(company: Company): Promise<{ goals: CompanyGoals | null; projection: MonthProjection }> {
+  const month = resolvePeriod("mes_atual", {}, company.timezone);
+  const monthBi = await computeCompanyBi(company.id, company.timezone, month, EMPTY_FILTERS);
+  const goals = await getGoals(company.id);
+  return { goals, projection: projectMonth(monthBi.current, goals, company.timezone) };
+}
+
 app.get("/empresa/:companyId/marketing", requireMarketingAccess, async (req, res) => {
   const base = await marketingContext(req, res);
-  res.send(marketingOverviewPage(base, channelCostQuality(base.bi.providers)));
+  const { projection } = await monthProjectionFor(res.locals.company);
+  res.send(marketingOverviewPage(base, channelCostQuality(base.bi.providers), projection));
 });
+
+app.get("/empresa/:companyId/marketing/criativos", requireMarketingAccess, async (req, res) => {
+  res.send(creativesPage(await marketingContext(req, res)));
+});
+
+async function renderGoals(req: express.Request, res: express.Response, extra: { notice?: string; error?: string } = {}): Promise<void> {
+  const base = await marketingContext(req, res, {}, "mes_atual");
+  const { goals, projection } = await monthProjectionFor(res.locals.company);
+  res.send(goalsPage(base, goals, projection, extra.notice, extra.error));
+}
+
+app.get("/empresa/:companyId/marketing/metas", requireMarketingAccess, async (req, res) => renderGoals(req, res));
 
 app.get("/empresa/:companyId/marketing/campanhas", requireMarketingAccess, async (req, res) => {
   res.send(marketingCampaignsPage(await marketingContext(req, res)));
@@ -1550,7 +1593,7 @@ app.post("/empresa/:companyId/inteligencia/metas", requireCompanyAccess, async (
     planned_monthly_spend_cents: cents(b.planned_spend),
   });
   await audit("metas_atualizadas", { companyId: company.id, userId: res.locals.user.id, ip: clientIp(req) });
-  await renderIntelligence(req, res, { notice: "Metas salvas." });
+  await renderGoals(req, res, { notice: "Metas salvas." });
 });
 
 // --- Alertas por empresa -----------------------------------------------------------------
